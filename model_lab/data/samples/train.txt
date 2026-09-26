@@ -1,0 +1,8 @@
+def add(left, right):
+    return left + right
+
+def greet(name):
+    return f"Hello, {name}!"
+
+def keep_even(values):
+    return [value for value in values if value % 2 == 0]

@@ -45,3 +45,7 @@ credentials/
 # Local scratch files
 scratch/
 .tmp/
+
+# Original-model experiments: keep training data and weights local
+model_lab/runs/
+model_lab/data/local/

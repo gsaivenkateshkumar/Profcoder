@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "path": "samples/train.txt",
+      "split": "train",
+      "sha256": "912917d5cc6db758ab944f3b94d41f2f3fd2209bf3bca6a42d6ae8c0fb58cf0f",
+      "license": "CC0-1.0",
+      "source": "New synthetic demo examples for the Profcoder model lab",
+      "rights_reviewed": true
+    },
+    {
+      "path": "samples/validation.txt",
+      "split": "validation",
+      "sha256": "ecdc24f7c7a5ec5054a7e7f0e7d1e43261e92f090702cd5fa60a4b28b8fd9139",
+      "license": "CC0-1.0",
+      "source": "New synthetic demo examples for the Profcoder model lab",
+      "rights_reviewed": true
+    }
+  ]
+}
