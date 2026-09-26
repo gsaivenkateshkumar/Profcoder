@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,7 @@ class GroqProvider(ChatProvider):
         tools: list[dict[str, object]],
         *,
         max_completion_tokens: int,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> object:
         try:
             import groq
@@ -123,7 +124,7 @@ class GroqProvider(ChatProvider):
                 model=self.model,
                 messages=messages,
                 tools=tools,
-                tool_choice="auto",
+                tool_choice=tool_choice,
                 parallel_tool_calls=False,
                 temperature=0.2,
                 max_completion_tokens=max_completion_tokens,
