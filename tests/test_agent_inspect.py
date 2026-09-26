@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import groq
+import httpx
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -26,7 +28,7 @@ from app.agent_inspect import (
 )
 from app.file_edits import MAX_FILE_BYTES
 from app.main import app
-from app.providers import GroqProvider
+from app.providers import GroqProvider, ProviderError, ProviderRateLimitError
 from app.test_runner import GitReviewResult
 
 
@@ -292,7 +294,7 @@ def test_insufficient_evidence_answer_follows_empty_search(inspector):
     assert search_result["result"]["results"] == []
 
 
-def test_slow_provider_ends_within_overall_deadline(inspector, monkeypatch):
+def test_slow_provider_ends_within_overall_deadline(inspector, monkeypatch, caplog):
     client, _ = inspector
     monkeypatch.setattr("app.main.MAX_INSPECT_SECONDS", 0.05)
 
@@ -303,12 +305,29 @@ def test_slow_provider_ends_within_overall_deadline(inspector, monkeypatch):
     app.state.provider = SlowProvider()
     started = time.monotonic()
 
-    response = client.post("/agent/inspect", json={"question": "Inspect slowly."})
+    with caplog.at_level("WARNING", logger="app.main"):
+        response = client.post(
+            "/agent/inspect",
+            json={"question": "PRIVATE_QUESTION_SENTINEL"},
+        )
 
     elapsed = time.monotonic() - started
     assert response.status_code == 504
     assert response.json() == {"detail": "Inspection timed out"}
     assert elapsed < 0.5
+    assert "phase=request" in caplog.text
+    assert "sdk_exception=TimeoutError" in caplog.text
+    assert "status=504" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert "PRIVATE_QUESTION_SENTINEL" not in caplog.text
+
+
+def test_overall_deadline_covers_all_serial_tool_turns():
+    from app.providers import GroqProvider
+
+    provider = GroqProvider(api_key="FAKE_KEY_SENTINEL", model="fake-model")
+    assert provider.timeout == 30
+    assert MAX_INSPECT_SECONDS >= MAX_MODEL_TURNS * provider.timeout
 
 
 def test_slow_sync_tool_keeps_health_responsive_and_times_out(inspector, monkeypatch):
@@ -528,6 +547,7 @@ def test_git_review_tool_is_available_only_when_configured(inspector):
 
 def test_groq_tool_method_uses_supported_async_request_shape(monkeypatch):
     captured = {}
+    client_options = {}
     response_message = SimpleNamespace(content="done", tool_calls=[])
 
     class FakeCompletions:
@@ -537,6 +557,7 @@ def test_groq_tool_method_uses_supported_async_request_shape(monkeypatch):
 
     class FakeAsyncGroq:
         def __init__(self, **kwargs):
+            client_options.update(kwargs)
             self.chat = SimpleNamespace(completions=FakeCompletions())
 
     monkeypatch.setitem(sys.modules, "groq", SimpleNamespace(AsyncGroq=FakeAsyncGroq))
@@ -555,3 +576,64 @@ def test_groq_tool_method_uses_supported_async_request_shape(monkeypatch):
     assert captured["tool_choice"] == "none"
     assert captured["parallel_tool_calls"] is False
     assert captured["max_completion_tokens"] == 32
+    assert client_options["max_retries"] == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "sdk_error_name", "expected_category", "expected_error"),
+    [
+        (400, "BadRequestError", "http_error", ProviderError),
+        (429, "RateLimitError", "rate_limit", ProviderRateLimitError),
+    ],
+)
+def test_groq_errors_log_only_sdk_metadata(monkeypatch, caplog, status, sdk_error_name, expected_category, expected_error):
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(status, request=request)
+    error_type = getattr(groq, sdk_error_name)
+    provider_error = error_type(
+        "FAKE_EXCEPTION_SENTINEL mentions rate limit and timeout",
+        response=response,
+        body={"detail": "FAKE_BODY_SENTINEL"},
+    )
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            raise provider_error
+
+    class FakeAsyncGroq:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    sdk_stub = SimpleNamespace(
+        AsyncGroq=FakeAsyncGroq,
+        APIError=groq.APIError,
+        APIStatusError=groq.APIStatusError,
+        APITimeoutError=groq.APITimeoutError,
+        APIConnectionError=groq.APIConnectionError,
+        RateLimitError=groq.RateLimitError,
+        AuthenticationError=groq.AuthenticationError,
+    )
+    monkeypatch.setitem(sys.modules, "groq", sdk_stub)
+    provider = GroqProvider(api_key="FAKE_KEY_SENTINEL", model="fake-model")
+
+    with caplog.at_level("WARNING", logger="app.providers"), pytest.raises(expected_error):
+        asyncio.run(provider.chat_with_tools(
+            [{"role": "user", "content": "QUESTION_SENTINEL"}],
+            [{"type": "function", "function": {"name": "search_text", "arguments": "ARGUMENT_SENTINEL"}}],
+            max_completion_tokens=32,
+        ))
+
+    log_output = caplog.text
+    assert f"category={expected_category}" in log_output
+    assert f"sdk_exception={sdk_error_name}" in log_output
+    assert f"status={status}" in log_output
+    assert "phase=tool_completion" in log_output
+    assert "elapsed_ms=" in log_output
+    for forbidden in (
+        "FAKE_EXCEPTION_SENTINEL",
+        "FAKE_BODY_SENTINEL",
+        "FAKE_KEY_SENTINEL",
+        "QUESTION_SENTINEL",
+        "ARGUMENT_SENTINEL",
+    ):
+        assert forbidden not in log_output

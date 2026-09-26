@@ -27,7 +27,7 @@ from app.test_runner import GitChangeReader
 
 MAX_AGENT_REQUEST_BYTES = 12 * 1024
 MAX_QUESTION_CHARS = 4000
-MAX_INSPECT_SECONDS = 20.0
+MAX_INSPECT_SECONDS = 180.0
 MAX_MODEL_TURNS = 5
 MAX_TOOL_CALLS = 6
 MAX_TOOL_ARGUMENT_BYTES = 4096
@@ -115,7 +115,7 @@ def _tool_definitions(git_reader: GitChangeReader | None) -> list[dict[str, obje
         ),
         _tool_definition(
             "search_text",
-            "Search using a short literal query, not a natural-language prompt. Use an existing relative directory path. Returns matching paths, line numbers, and short excerpts.",
+            "Search using a short literal code/text fragment (for example, a symbol name), not a question or natural-language prompt. Supply an existing relative directory path or omit path to search the project root. Returns matching paths, line numbers, and short excerpts.",
             {
                 "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
                 "path": {"type": "string", "maxLength": MAX_PATH_CHARS},

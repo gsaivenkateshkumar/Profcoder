@@ -4,6 +4,7 @@ import asyncio
 import os
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -169,16 +170,25 @@ async def agent_inspect(request: Request):
     if not callable(getattr(provider, "chat_with_tools", None)):
         raise HTTPException(status_code=503, detail="Groq tool calling is not configured")
 
+    inspection_started = time.monotonic()
     try:
         answer = await asyncio.wait_for(
             _run_inspect_request(request, provider, project_root),
             timeout=MAX_INSPECT_SECONDS,
         )
     except asyncio.TimeoutError as exc:
-        logger.warning("agent inspect request category=timeout")
+        elapsed_ms = max(0, round((time.monotonic() - inspection_started) * 1000))
+        logger.warning(
+            "agent inspect phase=request category=timeout sdk_exception=TimeoutError status=504 elapsed_ms=%d",
+            elapsed_ms,
+        )
         raise HTTPException(status_code=504, detail="Inspection timed out") from exc
     except asyncio.CancelledError:
-        logger.warning("agent inspect request category=cancelled")
+        elapsed_ms = max(0, round((time.monotonic() - inspection_started) * 1000))
+        logger.warning(
+            "agent inspect phase=request category=cancelled sdk_exception=CancelledError status=503 elapsed_ms=%d",
+            elapsed_ms,
+        )
         return JSONResponse(
             status_code=503,
             content={"detail": "Inspection cancelled"},

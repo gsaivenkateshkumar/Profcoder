@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Literal
@@ -22,6 +23,54 @@ class ProviderTimeoutError(ProviderError):
 
 class ProviderRateLimitError(ProviderError):
     pass
+
+
+def _raise_groq_provider_error(exc: Exception, sdk: object, *, phase: str, started: float) -> None:
+    api_error_type = getattr(sdk, "APIError", ())
+    api_status_error_type = getattr(sdk, "APIStatusError", ())
+    api_timeout_error_type = getattr(sdk, "APITimeoutError", ())
+    api_connection_error_type = getattr(sdk, "APIConnectionError", ())
+    rate_limit_error_type = getattr(sdk, "RateLimitError", ())
+    authentication_error_type = getattr(sdk, "AuthenticationError", ())
+
+    is_api_error = isinstance(api_error_type, type) and isinstance(exc, api_error_type)
+    is_status_error = isinstance(api_status_error_type, type) and isinstance(exc, api_status_error_type)
+    status = getattr(exc, "status_code", None) if is_api_error else None
+    if not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599:
+        status = None
+
+    if isinstance(api_timeout_error_type, type) and isinstance(exc, api_timeout_error_type):
+        category = "timeout"
+    elif (isinstance(rate_limit_error_type, type) and isinstance(exc, rate_limit_error_type)) or status == 429:
+        category = "rate_limit"
+    elif (isinstance(authentication_error_type, type) and isinstance(exc, authentication_error_type)) or status in {401, 403}:
+        category = "authentication"
+    elif is_status_error or status is not None:
+        category = "http_error"
+    elif isinstance(api_connection_error_type, type) and isinstance(exc, api_connection_error_type):
+        category = "connection"
+    else:
+        category = "request"
+
+    exception_class = type(exc).__name__ if is_api_error else "UnexpectedError"
+    status_label = str(status) if status is not None else "none"
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    logger.warning(
+        "Groq provider phase=%s category=%s sdk_exception=%s status=%s elapsed_ms=%d",
+        phase,
+        category,
+        exception_class,
+        status_label,
+        elapsed_ms,
+    )
+
+    if category == "timeout":
+        raise ProviderTimeoutError("Groq request timed out") from exc
+    if category == "rate_limit":
+        raise ProviderRateLimitError("Groq rate limit exceeded") from exc
+    if category == "authentication":
+        raise MissingKeyError("Groq key missing or invalid") from exc
+    raise ProviderError("Groq request failed") from exc
 
 
 @dataclass
@@ -55,12 +104,18 @@ class GroqProvider(ChatProvider):
         self.model = model
         self.timeout = timeout
         self._client = None
+        self._tool_client = None
 
     async def chat(self, messages: list[ChatMessage], *, stream: bool = False) -> AsyncIterator[str] | str:
+        started = time.monotonic()
         try:
             import groq
         except ImportError as exc:
-            logger.warning("Groq provider error category=dependency")
+            elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+            logger.warning(
+                "Groq provider phase=chat_completion category=dependency sdk_exception=ImportError status=none elapsed_ms=%d",
+                elapsed_ms,
+            )
             raise ProviderError("Groq client dependency not installed") from exc
 
         payload = {
@@ -89,19 +144,7 @@ class GroqProvider(ChatProvider):
             response = await self._client.chat.completions.create(**payload)
             return response.choices[0].message.content
         except Exception as exc:
-            message = str(exc)
-            lower = message.lower()
-            if "timeout" in lower:
-                logger.warning("Groq provider error category=timeout")
-                raise ProviderTimeoutError("Groq request timed out") from exc
-            if "rate limit" in lower or "429" in lower:
-                logger.warning("Groq provider error category=rate_limit")
-                raise ProviderRateLimitError("Groq rate limit exceeded") from exc
-            if "missing" in lower or "api key" in lower or "unauthorized" in lower:
-                logger.warning("Groq provider error category=authentication")
-                raise MissingKeyError("Groq key missing or invalid") from exc
-            logger.warning("Groq provider error category=request")
-            raise ProviderError("Groq request failed") from exc
+            _raise_groq_provider_error(exc, groq, phase="chat_completion", started=started)
 
     async def chat_with_tools(
         self,
@@ -111,16 +154,25 @@ class GroqProvider(ChatProvider):
         max_completion_tokens: int,
         tool_choice: Literal["auto", "none"] = "auto",
     ) -> object:
+        started = time.monotonic()
         try:
             import groq
         except ImportError as exc:
-            logger.warning("Groq provider error category=dependency")
+            elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+            logger.warning(
+                "Groq provider phase=tool_completion category=dependency sdk_exception=ImportError status=none elapsed_ms=%d",
+                elapsed_ms,
+            )
             raise ProviderError("Groq client dependency not installed") from exc
 
         try:
-            if self._client is None:
-                self._client = groq.AsyncGroq(api_key=self.api_key, timeout=self.timeout)
-            response = await self._client.chat.completions.create(
+            if self._tool_client is None:
+                self._tool_client = groq.AsyncGroq(
+                    api_key=self.api_key,
+                    timeout=self.timeout,
+                    max_retries=0,
+                )
+            response = await self._tool_client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=tools,
@@ -131,15 +183,4 @@ class GroqProvider(ChatProvider):
             )
             return response.choices[0].message
         except Exception as exc:
-            lower = str(exc).lower()
-            if "timeout" in lower:
-                logger.warning("Groq provider error category=timeout")
-                raise ProviderTimeoutError("Groq request timed out") from exc
-            if "rate limit" in lower or "429" in lower:
-                logger.warning("Groq provider error category=rate_limit")
-                raise ProviderRateLimitError("Groq rate limit exceeded") from exc
-            if "missing" in lower or "api key" in lower or "unauthorized" in lower:
-                logger.warning("Groq provider error category=authentication")
-                raise MissingKeyError("Groq key missing or invalid") from exc
-            logger.warning("Groq provider error category=request")
-            raise ProviderError("Groq request failed") from exc
+            _raise_groq_provider_error(exc, groq, phase="tool_completion", started=started)
