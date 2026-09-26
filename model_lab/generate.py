@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import math
 import stat
@@ -30,12 +32,21 @@ class GenerationResult:
 
 def load_model(checkpoint_path: Path) -> ByteTransformer:
     """Rebuild the model from a version-1 checkpoint written by model_lab.train."""
+    return load_checkpoint(checkpoint_path)[0]
+
+
+def load_checkpoint(checkpoint_path: Path) -> tuple[ByteTransformer, dict[str, object]]:
+    """Return the eval-mode model plus the step, corpus fingerprint, and file SHA-256."""
     path = Path(checkpoint_path)
     if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("checkpoint must be a regular file")
     if path.stat().st_size > MAX_CHECKPOINT_BYTES:
         raise ValueError("checkpoint is too large")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    raw = path.read_bytes()
+    if len(raw) > MAX_CHECKPOINT_BYTES:
+        raise ValueError("checkpoint is too large")
+    # Hash and load the same bytes so the reported identity is what was evaluated.
+    checkpoint = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
         raise ValueError("unsupported checkpoint")
     model_config = checkpoint.get("model_config")
@@ -52,7 +63,13 @@ def load_model(checkpoint_path: Path) -> ByteTransformer:
         model.load_state_dict(checkpoint["model"], strict=True)
     except RuntimeError as error:
         raise ValueError("checkpoint weights do not match its model configuration") from error
-    return model.eval()
+    step, fingerprint = checkpoint.get("step"), checkpoint.get("data_fingerprint")
+    info = {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "step": step if type(step) is int else None,
+        "data_fingerprint": fingerprint if isinstance(fingerprint, str) else None,
+    }
+    return model.eval(), info
 
 
 @torch.no_grad()

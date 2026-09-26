@@ -18,23 +18,29 @@ MAX_SAMPLES = 1000
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
 SPLITS = ("train", "validation")
+SAMPLE_FIELDS = {"path", "split", "sha256", "license", "source", "rights_reviewed"}
+PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
 
-def _sample_bytes(root: Path, relative_name: str) -> bytes:
+def _sample_bytes(root: Path, relative_name: str, project: str | None = None) -> bytes:
+    """Version 1 reads samples/<name>.txt; version 2 reads samples/<project>/<name>.txt."""
     if not isinstance(relative_name, str):
         raise ValueError("sample path must be a string")
     pure = PurePosixPath(relative_name)
+    expected_parts = ("samples",) if project is None else ("samples", project)
     if (
         pure.is_absolute()
         or relative_name != pure.as_posix()
         or "\\" in relative_name
         or ":" in relative_name
         or "\x00" in relative_name
-        or len(pure.parts) != 2
-        or pure.parts[0] != "samples"
+        or len(pure.parts) != len(expected_parts) + 1
+        or pure.parts[:-1] != expected_parts
         or pure.suffix != ".txt"
     ):
-        raise ValueError("sample must be samples/<name>.txt under the manifest directory")
+        if project is None:
+            raise ValueError("sample must be samples/<name>.txt under the manifest directory")
+        raise ValueError("sample must be samples/<project>/<name>.txt for its own project")
     candidate = root
     for part in pure.parts:
         candidate = candidate / part
@@ -68,25 +74,34 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
         raise ValueError("manifest is empty or too large")
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
-    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if type(version) is not int or version not in (1, 2):
         raise ValueError("unsupported manifest version")
     samples = manifest.get("samples")
     if not isinstance(samples, list) or not 2 <= len(samples) <= MAX_SAMPLES:
         raise ValueError("manifest needs a bounded list of samples")
 
+    fields = SAMPLE_FIELDS if version == 1 else SAMPLE_FIELDS | {"project"}
     grouped: dict[str, list[tuple[str, bytes]]] = {split: [] for split in SPLITS}
+    project_splits: dict[str, str] = {}
     paths: set[str] = set()
     digests: set[str] = set()
     total_bytes = 0
     for item in samples:
-        if not isinstance(item, dict) or set(item) != {
-            "path", "split", "sha256", "license", "source", "rights_reviewed"
-        }:
+        if not isinstance(item, dict) or set(item) != fields:
             raise ValueError("invalid sample manifest fields")
         relative_name, split, expected = item["path"], item["split"], item["sha256"]
         license_id, source = item["license"], item["source"]
         if type(split) is not str or split not in SPLITS:
             raise ValueError("unsupported split")
+        project = None
+        if version == 2:
+            project = item["project"]
+            if type(project) is not str or not PROJECT_ID.fullmatch(project):
+                raise ValueError("project must be a lowercase identifier")
+            # A project held out for validation must never contribute training text.
+            if project_splits.setdefault(project, split) != split:
+                raise ValueError("project spans train and validation splits")
         if (
             type(expected) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", expected)
@@ -100,7 +115,7 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
             raise ValueError("sample requires a reviewed source, license and SHA-256")
         if relative_name in paths or expected in digests:
             raise ValueError("duplicate file or content across corpus splits")
-        data = _sample_bytes(root, relative_name)
+        data = _sample_bytes(root, relative_name, project)
         total_bytes += len(data)
         if total_bytes > MAX_TOTAL_BYTES:
             raise ValueError("corpus exceeds total size limit")
@@ -136,6 +151,12 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
         "tokens": token_counts,
         "source_bytes": total_bytes,
     }
+    if version == 2:
+        # Version 1 metadata stays byte-identical so existing run fingerprints still match.
+        metadata["manifest_version"] = 2
+        metadata["projects"] = {
+            split: sorted(p for p, s in project_splits.items() if s == split) for split in SPLITS
+        }
     (output_dir / "metadata.json").write_bytes(
         (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )

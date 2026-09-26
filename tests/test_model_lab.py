@@ -107,6 +107,168 @@ class CorpusTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "linked"):
             prepare(self.manifest, self.root / "out2")
 
+    def test_version_1_keeps_its_fields_and_metadata(self):
+        self.items[0]["project"] = "demo"
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, "fields"):
+            prepare(self.manifest, self.root / "out1")
+        del self.items[0]["project"]
+        self.write_manifest()
+        metadata = prepare(self.manifest, self.root / "out2")
+        self.assertNotIn("projects", metadata)
+        self.assertNotIn("manifest_version", metadata)
+
+    def test_committed_demo_manifest_output_is_unchanged(self):
+        manifest = Path(__file__).resolve().parents[1] / "model_lab/data/manifest.json"
+        metadata = prepare(manifest, self.root / "demo")
+        self.assertEqual(metadata["tokens"], {"train": 175, "validation": 99})
+        self.assertEqual(
+            metadata["manifest_sha256"],
+            "def164bc4c0f92eb7bc32bbefbac5285fe549c473d606dc18cd4dab5fc354f6a",
+        )
+
+
+class ProjectManifestTests(unittest.TestCase):
+    """Version 2: every sample names a source project held entirely in one split."""
+
+    PROJECTS = {
+        "calc-tools": ("train", {
+            "add.txt": b"def add(a, b):\n    return a + b\n",
+            "sub.txt": b"def sub(a, b):\n    return a - b\n",
+        }),
+        "greeter": ("train", {"greet.txt": b"def greet(name):\n    return 'hi ' + name\n"}),
+        "shapes": ("validation", {"area.txt": b"def area(w, h):\n    return w * h\n"}),
+    }
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.items = []
+        for project, (split, files) in self.PROJECTS.items():
+            for name, data in files.items():
+                self.add_file(project, split, name, data)
+        self.manifest = self.root / "manifest.json"
+        self.write_manifest()
+
+    def add_file(self, project, split, name, data):
+        path = self.root / "samples" / project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        item = {
+            "path": f"samples/{project}/{name}", "project": project, "split": split,
+            "sha256": hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest(),
+            "license": "CC0-1.0", "source": "Original synthetic test project",
+            "rights_reviewed": True,
+        }
+        self.items.append(item)
+        return item
+
+    def write_manifest(self):
+        self.manifest.write_bytes(
+            json.dumps({"version": 2, "samples": self.items}, indent=2).encode("utf-8")
+        )
+
+    def assert_rejected(self, pattern, name="out"):
+        output = self.root / name
+        with self.assertRaisesRegex(ValueError, pattern):
+            prepare(self.manifest, output)
+        self.assertFalse(output.exists())
+
+    def test_projects_are_recorded_and_tokenized_by_split(self):
+        metadata = prepare(self.manifest, self.root / "out")
+        self.assertEqual(metadata["manifest_version"], 2)
+        self.assertEqual(
+            metadata["projects"],
+            {"train": ["calc-tools", "greeter"], "validation": ["shapes"]},
+        )
+        binary = (self.root / "out/validation.u16le").read_bytes()
+        ids = struct.unpack("<" + "H" * (len(binary) // 2), binary)
+        area = self.PROJECTS["shapes"][1]["area.txt"].decode("utf-8")
+        self.assertEqual(list(ids), encode(area, add_eos=True))
+
+    def test_project_cannot_span_splits(self):
+        self.add_file("calc-tools", "validation", "mul.txt", b"def mul(a, b):\n    return a * b\n")
+        self.write_manifest()
+        self.assert_rejected("project spans train and validation")
+        # Order does not matter: a validation project cannot later gain training files.
+        self.items.insert(0, self.items.pop())
+        self.write_manifest()
+        self.assert_rejected("project spans train and validation")
+
+    def test_duplicate_content_is_rejected_across_splits_and_newlines(self):
+        copied = self.PROJECTS["calc-tools"][1]["add.txt"]
+        self.add_file("shapes", "validation", "copied.txt", copied.replace(b"\n", b"\r\n"))
+        self.write_manifest()
+        self.assert_rejected("duplicate")
+
+    def test_malformed_paths_are_rejected(self):
+        item = self.items[0]
+        for bad_path in (
+            "samples/greeter/add.txt",          # another project's directory
+            "samples/add.txt",                  # missing project directory
+            "samples/calc-tools/nested/add.txt",
+            "samples/calc-tools/../calc-tools/add.txt",
+            "samples/calc-tools/./add.txt",
+            "/samples/calc-tools/add.txt",
+            "samples\\calc-tools\\add.txt",
+            "C:samples/calc-tools/add.txt",
+            "samples/calc-tools/add.py",
+            "other/calc-tools/add.txt",
+            42,
+        ):
+            with self.subTest(path=bad_path):
+                item["path"] = bad_path
+                self.write_manifest()
+                self.assert_rejected("sample")
+
+    def test_malformed_hashes_are_rejected(self):
+        item = self.items[0]
+        good = item["sha256"]
+        for bad_hash, pattern in (
+            (good.upper(), "SHA-256"), (good[:-1], "SHA-256"), (None, "SHA-256"),
+            (hashlib.sha256(b"other").hexdigest(), "SHA-256 mismatch"),
+        ):
+            with self.subTest(sha256=bad_hash):
+                item["sha256"] = bad_hash
+                self.write_manifest()
+                self.assert_rejected(pattern)
+
+    def test_rights_and_project_metadata_are_required(self):
+        for field, value, pattern in (
+            ("rights_reviewed", False, "reviewed"),
+            ("rights_reviewed", "true", "reviewed"),
+            ("rights_reviewed", 1, "reviewed"),
+            ("license", "", "license"),
+            ("license", "CC0 1.0", "license"),
+            ("license", None, "license"),
+            ("source", "   ", "source"),
+            ("source", "x" * 257, "source"),
+            ("project", "Calc-Tools", "project"),
+            ("project", "../calc-tools", "project"),
+            ("project", "", "project"),
+            ("split", "test", "split"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.items[0][field] = value
+                self.write_manifest()
+                self.assert_rejected(pattern)
+        for missing in ("project", "license", "source", "rights_reviewed"):
+            with self.subTest(missing=missing):
+                self.setUp()
+                del self.items[0][missing]
+                self.write_manifest()
+                self.assert_rejected("fields")
+
+    def test_unknown_manifest_versions_are_rejected(self):
+        for version in (0, 3, True, "2", None):
+            with self.subTest(version=version):
+                self.manifest.write_bytes(
+                    json.dumps({"version": version, "samples": self.items}).encode("utf-8")
+                )
+                self.assert_rejected("version")
+
 
 if __name__ == "__main__":
     unittest.main()
