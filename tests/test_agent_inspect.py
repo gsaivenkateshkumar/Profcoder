@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.agent_inspect import (
     MAX_AGENT_REQUEST_BYTES,
     MAX_MODEL_TURNS,
+    MAX_QUERY_CHARS,
     MAX_READ_BYTES,
     MAX_RESPONSE_BYTES,
     MAX_TOOL_CALLS,
@@ -98,11 +99,18 @@ def test_inspect_passes_list_search_and_read_results_to_model(inspector):
     assert exposed_tools == {"list_files", "search_text", "read_file"}
 
 
-def test_inspect_does_not_read_excluded_or_outside_files(inspector, tmp_path):
+def test_inspect_does_not_read_excluded_or_outside_files(inspector, tmp_path, monkeypatch):
     client, root = inspector
     (root / ".env").write_text("PRIVATE_SENTINEL", encoding="utf-8")
     outside = tmp_path / "outside.txt"
     outside.write_text("OUTSIDE_SENTINEL", encoding="utf-8")
+    read_calls = []
+
+    def forbidden_read(*args, **kwargs):
+        read_calls.append((args, kwargs))
+        raise AssertionError("rejected paths must not reach the reader")
+
+    monkeypatch.setattr("app.agent_inspect.ProjectFileEditor.read_text", forbidden_read)
     model = FakeToolModel([
         model_message(tool_calls=[tool_call("read_file", {"path": ".env"}, "excluded")]),
         model_message(tool_calls=[tool_call("read_file", {"path": "../outside.txt"}, "outside")]),
@@ -125,18 +133,18 @@ def test_inspect_does_not_read_excluded_or_outside_files(inspector, tmp_path):
     assert all("OUTSIDE_SENTINEL" not in result for result in tool_results)
     assert "PRIVATE_SENTINEL" not in response.text
     assert "OUTSIDE_SENTINEL" not in response.text
+    assert all('"code":"invalid_arguments"' in result for result in tool_results)
+    assert read_calls == []
 
 
 @pytest.mark.parametrize(
     "call",
     [
         tool_call("delete_file", {}, "unknown"),
-        tool_call("read_file", "{malformed", "bad-json"),
-        tool_call("read_file", {"path": "src/a.py", "command": "run"}, "extra-arg"),
-        tool_call("git_review", {"path": "."}, "bad-git-args"),
+        tool_call("list_files", {}, "malformed id"),
     ],
 )
-def test_inspect_rejects_unknown_or_malformed_calls(inspector, call):
+def test_inspect_rejects_unknown_tools_and_malformed_call_ids(inspector, call):
     client, _ = inspector
     model = FakeToolModel([model_message(tool_calls=[call])])
     app.state.provider = model
@@ -146,6 +154,86 @@ def test_inspect_rejects_unknown_or_malformed_calls(inspector, call):
     assert response.status_code == 502
     assert response.json() == {"detail": "Agent inspection could not be completed"}
     assert len(model.requests) == 1
+
+
+def test_invalid_search_arguments_return_constraints_and_allow_retry(inspector, monkeypatch, caplog):
+    client, root = inspector
+    (root / "match.txt").write_text("retry-marker is here", encoding="utf-8")
+    invalid_query = "q" * (MAX_QUERY_CHARS + 1)
+    dispatched = []
+    original_search = __import__("app.agent_inspect", fromlist=["search_project_files"]).search_project_files
+
+    def search_spy(project_root, query, path):
+        dispatched.append(query)
+        return original_search(project_root, query, path)
+
+    monkeypatch.setattr("app.agent_inspect.search_project_files", search_spy)
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("search_text", {"query": invalid_query}, "invalid-search")]),
+        model_message(tool_calls=[tool_call("search_text", {"query": "retry-marker"}, "valid-search")]),
+        model_message(content="The match is in match.txt."),
+    ])
+    app.state.provider = model
+
+    with caplog.at_level("WARNING", logger="app.agent_inspect"):
+        response = client.post("/agent/inspect", json={"question": "Find the marker."})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "The match is in match.txt."}
+    error_message = model.requests[1]["messages"][-1]
+    error_payload = json.loads(error_message["content"])
+    assert error_message["tool_call_id"] == "invalid-search"
+    assert error_payload["tool_error"]["code"] == "invalid_arguments"
+    assert "non-blank string" in error_payload["tool_error"]["accepted"]
+    assert f"1-{MAX_QUERY_CHARS}" in error_payload["tool_error"]["accepted"]
+    valid_result = model.requests[2]["messages"][-1]
+    assert valid_result["tool_call_id"] == "valid-search"
+    assert "match.txt" in valid_result["content"]
+    assert dispatched == ["retry-marker"]
+    assert "category=invalid_arguments" in caplog.text
+    assert invalid_query not in caplog.text
+
+
+def test_malformed_json_arguments_return_structured_error_and_retry(inspector):
+    client, _ = inspector
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("search_text", "{malformed", "bad-json")]),
+        model_message(content="I could not search because the arguments were malformed."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Search the project."})
+
+    assert response.status_code == 200
+    error_payload = json.loads(model.requests[1]["messages"][-1]["content"])
+    assert model.requests[1]["messages"][-1]["tool_call_id"] == "bad-json"
+    assert error_payload["tool_error"]["code"] == "invalid_arguments"
+    assert "query" in error_payload["tool_error"]["accepted"]
+
+
+def test_repeated_invalid_calls_count_toward_tool_call_limit(inspector):
+    client, _ = inspector
+    invalid_calls = [
+        tool_call("search_text", {"query": ""}, f"invalid-{index}")
+        for index in range(MAX_TOOL_CALLS)
+    ]
+    model = FakeToolModel([
+        model_message(tool_calls=invalid_calls),
+        model_message(tool_calls=[tool_call("list_files", {}, "over-limit")]),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Search."})
+
+    assert response.status_code == 502
+    assert len(model.requests) == 2
+    returned_errors = [
+        message
+        for message in model.requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert len(returned_errors) == MAX_TOOL_CALLS
+    assert all('"code":"invalid_arguments"' in message["content"] for message in returned_errors)
 
 
 def test_inspect_never_uses_non_read_tools_or_exceeds_turn_limit(inspector):
@@ -214,7 +302,9 @@ def test_inspect_bounds_request_file_context_and_response(inspector, monkeypatch
     large_response = client.post("/agent/inspect", json={"question": "Read the large file."})
     assert large_response.status_code == 200
     assert "File exceeds the size limit" not in large_response.text
-    assert "unsupported" in model.requests[1]["messages"][-1]["content"]
+    large_file_error = json.loads(model.requests[1]["messages"][-1]["content"])
+    assert large_file_error["tool_error"]["code"] == "invalid_arguments"
+    assert "500 KiB" in large_file_error["tool_error"]["accepted"]
 
     monkeypatch.setattr("app.agent_inspect.MAX_TOTAL_TOOL_RESULT_BYTES", 1024)
     (root / "large.txt").write_text("x" * MAX_READ_BYTES, encoding="utf-8")
