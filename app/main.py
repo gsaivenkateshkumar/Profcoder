@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -13,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.agent_inspect import (
     MAX_AGENT_REQUEST_BYTES,
+    MAX_INSPECT_SECONDS,
     AgentInspectError,
     AgentInspectRequest,
     inspect_project_question,
@@ -91,6 +94,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Profcoder API", lifespan=lifespan)
+logger = logging.getLogger(__name__)
 
 
 @app.get("/health")
@@ -140,6 +144,22 @@ async def _read_bounded_body(request: Request) -> bytes:
     return bytes(body)
 
 
+async def _run_inspect_request(request: Request, provider: object, project_root: Path) -> str:
+    body = await _read_bounded_body(request)
+    try:
+        payload = json.loads(body)
+        inspect_request = AgentInspectRequest.model_validate(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValidationError):
+        raise HTTPException(status_code=422, detail="Invalid inspect request")
+
+    return await inspect_project_question(
+        provider,
+        project_root,
+        inspect_request.question,
+        git_reader=getattr(app.state, "git_reader", None),
+    )
+
+
 @app.post("/agent/inspect")
 async def agent_inspect(request: Request):
     project_root = getattr(app.state, "project_root", None)
@@ -149,20 +169,22 @@ async def agent_inspect(request: Request):
     if not callable(getattr(provider, "chat_with_tools", None)):
         raise HTTPException(status_code=503, detail="Groq tool calling is not configured")
 
-    body = await _read_bounded_body(request)
     try:
-        payload = json.loads(body)
-        inspect_request = AgentInspectRequest.model_validate(payload)
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValidationError):
-        raise HTTPException(status_code=422, detail="Invalid inspect request")
-
-    try:
-        answer = await inspect_project_question(
-            provider,
-            project_root,
-            inspect_request.question,
-            git_reader=getattr(app.state, "git_reader", None),
+        answer = await asyncio.wait_for(
+            _run_inspect_request(request, provider, project_root),
+            timeout=MAX_INSPECT_SECONDS,
         )
+    except asyncio.TimeoutError as exc:
+        logger.warning("agent inspect request category=timeout")
+        raise HTTPException(status_code=504, detail="Inspection timed out") from exc
+    except asyncio.CancelledError:
+        logger.warning("agent inspect request category=cancelled")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Inspection cancelled"},
+        )
+    except HTTPException:
+        raise
     except ProviderTimeoutError as exc:
         raise HTTPException(status_code=504, detail="Groq request timed out") from exc
     except ProviderRateLimitError as exc:

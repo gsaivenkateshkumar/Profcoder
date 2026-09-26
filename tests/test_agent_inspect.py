@@ -3,16 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.agent_inspect import (
     MAX_AGENT_REQUEST_BYTES,
+    MAX_INSPECT_SECONDS,
     MAX_MODEL_TURNS,
     MAX_QUERY_CHARS,
     MAX_READ_BYTES,
@@ -285,6 +290,109 @@ def test_insufficient_evidence_answer_follows_empty_search(inspector):
     assert "do not have enough evidence" in response.json()["answer"]
     search_result = json.loads(model.requests[1]["messages"][-1]["content"])
     assert search_result["result"]["results"] == []
+
+
+def test_slow_provider_ends_within_overall_deadline(inspector, monkeypatch):
+    client, _ = inspector
+    monkeypatch.setattr("app.main.MAX_INSPECT_SECONDS", 0.05)
+
+    class SlowProvider:
+        async def chat_with_tools(self, messages, tools, *, max_completion_tokens, tool_choice="auto"):
+            await asyncio.sleep(2)
+
+    app.state.provider = SlowProvider()
+    started = time.monotonic()
+
+    response = client.post("/agent/inspect", json={"question": "Inspect slowly."})
+
+    elapsed = time.monotonic() - started
+    assert response.status_code == 504
+    assert response.json() == {"detail": "Inspection timed out"}
+    assert elapsed < 0.5
+
+
+def test_slow_sync_tool_keeps_health_responsive_and_times_out(inspector, monkeypatch):
+    client, _ = inspector
+    monkeypatch.setattr("app.main.MAX_INSPECT_SECONDS", 0.15)
+    tool_started = threading.Event()
+    release_tool = threading.Event()
+
+    def slow_dispatch(name, arguments, project_root, editor, git_reader):
+        tool_started.set()
+        release_tool.wait(timeout=2)
+        return {"files": [], "truncated": False}
+
+    monkeypatch.setattr("app.agent_inspect._dispatch_tool", slow_dispatch)
+    app.state.provider = FakeToolModel([
+        model_message(tool_calls=[tool_call("list_files", {}, "slow-list")]),
+        model_message(content="No files found."),
+    ])
+    started = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        inspect_future = executor.submit(
+            client.post,
+            "/agent/inspect",
+            json={"question": "List files."},
+        )
+        assert tool_started.wait(timeout=1)
+        health_future = executor.submit(client.get, "/health")
+        try:
+            health_response = health_future.result(timeout=0.3)
+        except FutureTimeoutError:
+            health_response = None
+        try:
+            inspect_response = inspect_future.result(timeout=1)
+        finally:
+            release_tool.set()
+
+    elapsed = time.monotonic() - started
+    assert health_response is not None and health_response.status_code == 200
+    assert inspect_response.status_code == 504
+    assert elapsed < 0.8
+
+
+def test_cancelled_inspection_returns_safe_response(tmp_path):
+    body = b'{"question":"Wait for provider"}'
+    started = asyncio.Event()
+
+    class SlowProvider:
+        async def chat_with_tools(self, messages, tools, *, max_completion_tokens, tool_choice="auto"):
+            started.set()
+            await asyncio.Event().wait()
+
+    async def run_cancelled_route():
+        app.state.project_root = tmp_path
+        app.state.git_reader = None
+        app.state.provider = SlowProvider()
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/agent/inspect",
+            "raw_path": b"/agent/inspect",
+            "query_string": b"",
+            "headers": [(b"content-length", str(len(body)).encode())],
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "root_path": "",
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        route_task = asyncio.create_task(agent_inspect(Request(scope, receive)))
+        await started.wait()
+        route_task.cancel()
+        return await route_task
+
+    from app.main import agent_inspect
+
+    response = asyncio.run(run_cancelled_route())
+    assert response.status_code == 503
+    assert response.body == b'{"detail":"Inspection cancelled"}'
 
 
 def test_final_turn_refuses_tool_calls_even_if_model_ignores_none(inspector, monkeypatch):

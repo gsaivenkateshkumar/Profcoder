@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -26,6 +27,7 @@ from app.test_runner import GitChangeReader
 
 MAX_AGENT_REQUEST_BYTES = 12 * 1024
 MAX_QUESTION_CHARS = 4000
+MAX_INSPECT_SECONDS = 20.0
 MAX_MODEL_TURNS = 5
 MAX_TOOL_CALLS = 6
 MAX_TOOL_ARGUMENT_BYTES = 4096
@@ -453,10 +455,17 @@ async def inspect_project_question(
         if tool_calls_used + len(raw_calls) > MAX_TOOL_CALLS:
             raise AgentInspectError("Agent tool-call limit reached")
 
-        validated_calls = [
-            _validate_tool_call(call, handlers, root, editor)
-            for call in raw_calls
-        ]
+        validated_calls = []
+        for call in raw_calls:
+            validated_calls.append(
+                await asyncio.to_thread(
+                    _validate_tool_call,
+                    call,
+                    handlers,
+                    root,
+                    editor,
+                )
+            )
         call_ids = [call[0] for call in validated_calls]
         if len(call_ids) != len(set(call_ids)) or any(call_id in seen_tool_call_ids for call_id in call_ids):
             raise AgentInspectError("Duplicate tool call identifiers")
@@ -485,7 +494,14 @@ async def inspect_project_question(
                 logger.warning("agent inspect tool error category=invalid_arguments")
                 content = _invalid_tool_content(name)
             else:
-                tool_result = _dispatch_tool(name, arguments, root, editor, git_reader)
+                tool_result = await asyncio.to_thread(
+                    _dispatch_tool,
+                    name,
+                    arguments,
+                    root,
+                    editor,
+                    git_reader,
+                )
                 content = _bounded_tool_content(tool_result)
             content_size = len(content.encode("utf-8"))
             if tool_result_bytes + content_size > MAX_TOTAL_TOOL_RESULT_BYTES:
