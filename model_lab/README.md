@@ -319,22 +319,27 @@ quality.
   state, and compute finite validation loss from the toy held-out file.
   Fluent code generation is **not** an expected result from this demo corpus.
 
-## Optional document extraction (proposal)
+## Optional document extraction (pilot run)
 
-The [two-page SQLite pilot](EXTRACTION_PILOT.md) will compare deterministic
-HTML extraction and optional ScrapeGraphAI extraction from the same saved,
-permitted pages. ScrapeGraphAI uses an existing LLM for extraction; it does
-not train the original Profcoder model. No page has been retrieved, scraper
-installed, or extraction accuracy, speed, or cost measured in this milestone.
-The owned ASTRA/company corpus and project split remain unchanged.
+The [two-page SQLite pilot](EXTRACTION_PILOT.md) compared deterministic HTML
+extraction (`model_lab/extraction/parse.py`) with ScrapeGraphAI 2.3.0 and a
+local CPU-only `qwen2.5:1.5b`, both on the same saved, permitted snapshots.
+Against a provisional, not yet human-verified answer key, direct parsing
+matched 15/15 items with exact, traceable spans in under 0.2 s per page.
+ScrapeGraphAI matched 7/15, produced 22 unattributed or altered items, and took
+up to 333 s and 2.1 GB of Ollama memory per page, with no provider charge. It
+is **not** recommended for the ingestion path. ScrapeGraphAI extracts with an
+existing LLM and does not train the Profcoder model. The pilot pages are in no
+training or validation split, and the owned ASTRA/company corpus, split, and
+checkpoints are unchanged.
 
 ## Next milestones
 
 1. Review the local owner-authorized corpus and add independently reviewed
    held-out projects. One company source file is a limited validation set.
-2. If its access and rights checks still pass, run the bounded optional
-   extraction pilot and decide from measured accuracy, time, and LLM usage
-   whether to keep ScrapeGraphAI as a separate ingestion component.
+2. Review the provisional extraction answer key. Keep deterministic parsing
+   for structured documentation. Revisit LLM extraction only for sources that
+   parsing cannot handle, and only with explicit approval for any cloud model.
 3. Compare offline CPU generation latency/quality with a separate, existing
    open-weight model in Profcoder. Consider quantization only after the
    measured baseline has been reviewed. Consider sparse experts and disk
