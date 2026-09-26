@@ -136,6 +136,51 @@ published.
 & .\.venv\Scripts\python.exe -m model_lab.prepare --manifest model_lab/data/local/owned-v1/manifest.json --output model_lab/runs/owned-v1-data
 ```
 
+### Pre-training audit
+
+Run `model_lab.audit` after building a corpus and before preparing or training
+on it:
+
+```powershell
+& .\.venv\Scripts\python.exe -m model_lab.audit --manifest model_lab/data/local/owned-v1/manifest.json --report model_lab/runs/owned-v1-audit.json
+```
+
+It reads only the files the manifest lists. There is no directory scanning,
+and unlisted files next to the samples are ignored. Every file goes through the same checks as
+preparation: path containment, symlink/junction and hard-link refusal, the
+1 MiB per-file and 16 MiB total limits, strict UTF-8, and the SHA-256 match.
+Exact duplicates stay preparation errors. The report
+lists only file paths, finding categories, and counts. It never includes
+matched values, line numbers, or surrounding text, and refusal messages come
+from fixed validation strings. Exit status is 0 when nothing is flagged, 1 when
+review is required, and 2 when the manifest or a file is refused. `--report`
+never overwrites. Keep reports under ignored `model_lab/runs/`.
+
+- `credential:*`: private-key blocks, known token formats, hard-coded values
+  assigned to credential-named identifiers (`password`, `api_key`,
+  `*_token`, …), URLs with embedded passwords, and literal comparisons against
+  values read from a password/secret/code prompt or `getpass`. Empty,
+  `<placeholder>`, `your_…`, template, and prompt-like strings are skipped.
+- `personal:*`: email addresses outside reserved example domains, phone
+  numbers, public IPv4 addresses, home-directory paths with a user name, and
+  Luhn-valid card numbers or national-ID-shaped numbers in string literals.
+- `review:*`: high-entropy literals and lines over 10,000 characters, which
+  are counted but not scanned.
+- Near-duplicates: files from *different* projects that share many sampled
+  8-token shingles (estimated Jaccard ≥ 0.5 or containment ≥ 0.7) are listed
+  as `needs-manual-review`, marked if they cross train/validation. The audit
+  never declares a pair safe or unsafe. Shingles common to more than 25 files
+  are ignored as boilerplate, and renamed or reformatted copies can evade this
+  check.
+
+**A clean audit is not proof of safety.** Patterns miss credentials with
+unusual names or formats, obfuscated or split values, and most personal data;
+person names in particular are not detected. They also flag some harmless
+code. Manual review is still required before training on or sharing any
+corpus. On the current local owned corpus the audit reports no findings and no
+cross-project near-duplicate pairs, after credentials and names had already
+been redacted by hand.
+
 The spec has the same project fields plus `clone` (local clone path), `files`
 (explicit source paths), and `redacted` (source path → reviewed replacement
 file). Builder tests need Git; set `PROFCODER_GIT` if `git` is not on `PATH`,
@@ -151,7 +196,11 @@ peaked at 367 MB RAM, and ended with train loss 2.77. Validation loss over all
 over 259 byte IDs scores ln 259 ≈ 5.56. The two projects differ in domain, age,
 and style, and validation is a single file, so this loss mostly reflects
 byte-level Python and English statistics. It does not measure code
-correctness, generalization, or coding ability.
+correctness, generalization, or coding ability. The validation set is a
+single file from one small, older project. One file's style dominates the
+score, it cannot show variance across projects, and it is too small to compare
+closely matched runs. Add several independent held-out projects before
+treating validation loss as a model-selection signal.
 
 ## CPU training milestone
 

@@ -9,6 +9,7 @@ import re
 import stat
 import sys
 from array import array
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from model_lab.tokenizer import TOKENIZER_VERSION, VOCAB_SIZE, encode
@@ -167,8 +168,26 @@ def _sample_bytes(root: Path, relative_name: str, project: str | None = None) ->
     return text.replace("\r\n", "\n").encode("utf-8")
 
 
-def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
-    """Prepare a tiny reviewed corpus; refuse existing output to prevent overwrite."""
+@dataclass(frozen=True)
+class SelectedSample:
+    path: str
+    split: str
+    project: str | None
+    data: bytes
+
+
+@dataclass(frozen=True)
+class Selection:
+    version: int
+    manifest_bytes: bytes
+    projects: dict[str, dict[str, object]]
+    project_splits: dict[str, str]
+    samples: list[SelectedSample]
+    total_bytes: int
+
+
+def read_selection(manifest_path: Path) -> Selection:
+    """Validate a manifest and read exactly the files it lists, without writing anything."""
     manifest_path = Path(manifest_path)
     root = manifest_path.parent.resolve(strict=True)
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -189,7 +208,7 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
         raise ValueError("manifest needs a bounded list of samples")
 
     fields = SAMPLE_FIELDS if version == 1 else SAMPLE_FIELDS | {"project"}
-    grouped: dict[str, list[tuple[str, bytes]]] = {split: [] for split in SPLITS}
+    selected: list[SelectedSample] = []
     project_splits: dict[str, str] = {name: str(p["split"]) for name, p in projects.items()}
     paths: set[str] = set()
     digests: set[str] = set()
@@ -234,9 +253,21 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
             raise ValueError("sample SHA-256 mismatch")
         paths.add(relative_name)
         digests.add(expected)
-        grouped[split].append((relative_name, data))
-    if any(not grouped[split] for split in SPLITS):
+        selected.append(SelectedSample(relative_name, split, project, data))
+    if any(all(s.split != split for s in selected) for split in SPLITS):
         raise ValueError("train and validation splits must both contain samples")
+    return Selection(version, manifest_bytes, projects, project_splits, selected, total_bytes)
+
+
+def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
+    """Prepare a tiny reviewed corpus; refuse existing output to prevent overwrite."""
+    selection = read_selection(manifest_path)
+    version, manifest_bytes = selection.version, selection.manifest_bytes
+    projects, project_splits = selection.projects, selection.project_splits
+    total_bytes = selection.total_bytes
+    grouped: dict[str, list[tuple[str, bytes]]] = {split: [] for split in SPLITS}
+    for sample in selection.samples:
+        grouped[sample.split].append((sample.path, sample.data))
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
