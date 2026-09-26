@@ -58,5 +58,40 @@ environments, caches, binary and oversized files; indexed content is not sent to
 Groq. Requests are bounded by path, scan, file, result, and excerpt limits. If
 `REPO_ROOT` is unset or invalid, these endpoints return `503`.
 
+## Internal file-editing interface
+`app.file_edits.ProjectFileEditor` is an internal Python interface only. It adds
+no HTTP route and is not callable by Groq. Construct it with the project root
+resolved from `REPO_ROOT`, then provide the original file's SHA-256 over raw
+bytes:
+
+```python
+import hashlib
+import os
+from pathlib import Path
+
+from app.file_edits import ProjectFileEditor
+
+project_root = Path(os.environ["REPO_ROOT"]).resolve(strict=True)
+target = project_root / "src/example.py"
+proposed_text = target.read_text(encoding="utf-8").replace("old", "new")
+original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+editor = ProjectFileEditor(project_root)
+preview = editor.preview("src/example.py", proposed_text, expected_sha256=original_hash)
+preview.diff
+receipt = editor.apply(preview)
+editor.rollback(receipt)
+```
+
+The editor reuses project path exclusions and rejects symlinks, Windows
+junctions, hard links, binary files, unsupported encodings, excluded paths, and
+paths outside the root. Supported files are UTF-8 (with or without BOM), use
+uniform LF, CRLF, or CR endings, and are at most 500 KiB. Apply checks the
+expected content hash and file signature before an atomic same-directory
+replacement. Rollback receipts are in-memory and tied to one editor instance;
+rollback refuses if the applied file has changed. There is no persistent undo
+journal. A hostile process that swaps parent directories in the narrow interval
+between validation and replacement remains a filesystem race; explicit NTFS
+file ACLs are not preserved (mode bits are).
+
 ## Status
 This repository is in the initial project setup stage. Dependencies, credentials, and live deployments have not been installed or configured.
