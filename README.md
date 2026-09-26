@@ -93,5 +93,38 @@ journal. A hostile process that swaps parent directories in the narrow interval
 between validation and replacement remains a filesystem race; explicit NTFS
 file ACLs are not preserved (mode bits are).
 
+## Internal test runner and Git review
+`app.test_runner.ProjectTestRunner` accepts only owner-defined named presets.
+Each `TestPreset` stores an absolute executable path and an immutable tuple of
+arguments; `run(project_root, preset_name)` accepts neither command strings nor
+per-call arguments. Example owner configuration:
+
+```python
+from pathlib import Path
+
+from app.test_runner import ProjectTestRunner, TestPreset
+
+presets = {
+	"unit": TestPreset(
+		Path(r"F:\profcoder\.venv\Scripts\python.exe"),
+		("-m", "pytest", "-q"),
+	),
+}
+runner = ProjectTestRunner(presets, timeout_seconds=120)
+result = runner.run(project_root, "unit")
+```
+
+Presets are limited to 32; timeouts are capped at 300 seconds and stdout/stderr
+at 64 KiB each (lower limits can be configured). Provider credential variables
+are removed from the child environment. A timeout kills the process tree on
+Windows when `taskkill.exe` is available. Running a preset executes code from
+the selected project with the current user's permissions; this runner is not an
+OS sandbox. No HTTP execution route or Groq tool integration is provided.
+
+`GitChangeReader` is also internal and read-only. It runs fixed status and diff
+operations with external diff/text conversion disabled, excludes sensitive
+project paths from diff content, and bounds each captured stream and command
+time. It does not execute project commands.
+
 ## Status
 This repository is in the initial project setup stage. Dependencies, credentials, and live deployments have not been installed or configured.
