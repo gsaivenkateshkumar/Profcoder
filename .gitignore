@@ -1,0 +1,47 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Pip cache and virtual environments
+.pip-cache/
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor and tool state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local caches and build artifacts
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.dist/
+build/
+dist/
+coverage/
+*.log
+
+# Credentials and local data
+secrets/
+credentials/
+*credentials*
+*.secret
+*.token
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Local scratch files
+scratch/
+.tmp/
