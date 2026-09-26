@@ -34,7 +34,46 @@ BOS, 257 for EOS, and 258 for padding. Its 259 IDs round-trip text without
 learned vocabulary or internet access. A learned tokenizer can be compared
 later, after the data pipeline and CPU training measurements work.
 
-## Training target and budget (estimates, not measured performance)
+## CPU training milestone
+
+Install the CPU-only PyTorch build into a separate training environment; use
+the official [PyTorch CPU installation selector](https://pytorch.org/get-started/locally/)
+if the command changes. The application environment does not need PyTorch.
+From the repository root on Windows, after data preparation:
+
+```powershell
+& .\.venv\Scripts\python.exe -m venv F:\profcoder-model-venv
+& F:\profcoder-model-venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+& F:\profcoder-model-venv\Scripts\python.exe -m unittest discover -s tests -p test_model_training.py -v
+& F:\profcoder-model-venv\Scripts\python.exe -m model_lab.train --run model_lab/runs/smoke-v1 --max-steps 2 --batch-size 2 --seq-length 32 --max-seconds 120
+```
+
+If the smoke run passes, start the bounded full experiment:
+
+```powershell
+& F:\profcoder-model-venv\Scripts\python.exe -m model_lab.train --run model_lab/runs/train-v1
+```
+
+`--resume --run model_lab/runs/train-v1` continues a saved run up to the
+100-step total. Reuse the original batch size and sequence length on resume;
+the program checks those settings, model configuration, and a fingerprint of
+the prepared corpus. Choose a new `--run` directory to begin again. Runs are
+ignored by Git, and the training environment lives outside the repository.
+`checkpoint.pt` holds model,
+optimizer, and CPU random-number states; it is saved atomically at validation
+intervals and at the end. Only load your own run files. The loader uses
+`weights_only=True`.
+
+`summary.json` reports completed steps, training tokens/second measured during
+steps, invocation wall time, process CPU time and average busy CPU cores, peak
+process resident memory, checkpoint size, and train/validation loss. Training
+throughput excludes evaluation and checkpoint writing. Validation uses up to
+four fixed windows from the distinct demo validation file; it does not measure
+general coding ability. The training data are too short for 128-token validation
+windows, so the default training sequence is **64** tokens. Sampled training
+windows may cross document boundaries in this toy milestone.
+
+## Training target and budget (estimates until measured on the server)
 
 - First **randomly initialized** decoder-only Transformer: 4 layers, width
   192, 4 attention heads, feed-forward width 768, context 256 tokens; tie
@@ -44,25 +83,24 @@ later, after the data pipeline and CPU training measurements work.
   **30 MB** (about 16 bytes per parameter); activations, temporary arrays,
   Python, the optimizer, and Windows require more. This is a sizing estimate,
   not a measured peak-RAM figure.
-- First training run: cap it at 100 steps with batch 8 and context 128 (at most
-  102,400 training-token positions) and a 30-minute wall-clock cutoff. Record
+- First training run: cap it at 100 steps with batch 8 and sequence length 64
+  (at most 51,200 training-token positions) and a 30-minute soft cutoff. Record
   tokens per second, peak process memory, CPU usage, checkpoint size, train and
   held-out validation loss, and exact wall time before increasing the budget.
   Actual throughput and training time on the i5-10400F are **unknown** until
-  measured on that computer.
-- Demo success: validate all samples; reproduce byte-for-byte token files; then
-  (in the next milestone) run a finite CPU training step, save/reload a
-  checkpoint with optimizer and RNG state, and compute finite held-out loss.
+  measured on that computer. A step or checkpoint may slightly exceed the time
+  limit because they finish before checking the clock again.
+- Demo success: validate all samples; reproduce byte-for-byte token files; run
+  a finite CPU training step, save/reload a checkpoint with optimizer and RNG
+  state, and compute finite validation loss from the toy held-out file.
   Fluent code generation is **not** an expected result from this demo corpus.
 
 ## Next milestones
 
-1. Install a CPU build of PyTorch in a **separate training environment** after
-   selecting the current Windows/CPU installer at
-   [PyTorch Get Started](https://pytorch.org/get-started/locally/). Do not add
-   it to the API's small `requirements.txt` or use the GT 710 for this baseline.
-2. Implement the model, finite-step CPU trainer, resumable checkpoints and
-   held-out loss; benchmark the server before choosing a longer run. Expand to
+1. Run the smoke and bounded training on the Windows server to measure
+   throughput, wall time, RAM, loss, and checkpoint size before increasing the
+   budget. Do not use the GT 710 for this baseline.
+2. Expand to
    carefully reviewed, deduplicated original/permissively licensed code,
    splitting by source project so evaluation is genuinely held out.
 3. Add offline CPU generation and compare latency/quality with a separate,

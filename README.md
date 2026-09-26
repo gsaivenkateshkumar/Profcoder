@@ -12,9 +12,10 @@ Profcoder is a personal coding agent served from this computer to other devices.
 - Replaceable model providers and later evaluation loops
 
 ## Original-model experiments
-The isolated [model lab](model_lab/README.md) begins with a reviewed toy corpus
-and a reversible CPU tokenizer. No original model has been trained yet; the
-existing online agent remains separate from this experiment.
+The isolated [model lab](model_lab/README.md) contains a reviewed toy corpus,
+reversible byte tokenizer, and a small, randomly initialized CPU Transformer
+with bounded training. The demo corpus is not enough to build a useful coding
+assistant; the existing online agent remains separate from this experiment.
 
 ## Architecture snapshot
 - `server/`: remote service entrypoint and orchestration
@@ -156,4 +157,3 @@ The FastAPI app has a Groq provider and bounded local project tools. The
 original-model experiment has a corpus/tokenizer preparation stage only;
 training, checkpoints, evaluation, quantization, and offline inference are
 future milestones.
-
