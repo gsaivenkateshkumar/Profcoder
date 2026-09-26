@@ -8,6 +8,21 @@ from typing import AsyncIterator, Literal
 
 logger = logging.getLogger(__name__)
 
+_SAFE_GROQ_ERROR_TYPES = frozenset({
+    "APIConnectionError",
+    "APIResponseValidationError",
+    "APIStatusError",
+    "APITimeoutError",
+    "AuthenticationError",
+    "BadRequestError",
+    "ConflictError",
+    "InternalServerError",
+    "NotFoundError",
+    "PermissionDeniedError",
+    "RateLimitError",
+    "UnprocessableEntityError",
+})
+
 
 class ProviderError(RuntimeError):
     pass
@@ -52,7 +67,8 @@ def _raise_groq_provider_error(exc: Exception, sdk: object, *, phase: str, start
     else:
         category = "request"
 
-    exception_class = type(exc).__name__ if is_api_error else "UnexpectedError"
+    candidate_class = type(exc).__name__
+    exception_class = candidate_class if is_api_error and candidate_class in _SAFE_GROQ_ERROR_TYPES else "UnexpectedError"
     status_label = str(status) if status is not None else "none"
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
     logger.warning(

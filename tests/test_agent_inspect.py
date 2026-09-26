@@ -41,8 +41,8 @@ def tool_call(name, arguments, call_id="call-1"):
     )
 
 
-def model_message(*, content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
+def model_message(*, content=None, tool_calls=None, reasoning=None):
+    return SimpleNamespace(content=content, tool_calls=tool_calls, reasoning=reasoning)
 
 
 class FakeToolModel:
@@ -249,33 +249,65 @@ def test_repeated_invalid_calls_consume_budget_and_force_final_turn(inspector):
     assert all('"code":"invalid_arguments"' in message["content"] for message in returned_errors)
 
 
-def test_reported_invalid_invalid_search_read_file_sequence_finishes(inspector):
+def test_three_invalid_calls_then_valid_search_and_read_use_sdk_message_format(inspector, caplog):
     client, root = inspector
     (root / "module.py").write_text("def target():\n    return 'evidence'\n", encoding="utf-8")
     invalid_long_query = "x" * (MAX_QUERY_CHARS + 1)
     model = FakeToolModel([
-        model_message(tool_calls=[tool_call("search_text", {"query": ""}, "invalid-short")]),
-        model_message(tool_calls=[tool_call("search_text", {"query": invalid_long_query}, "invalid-long")]),
-        model_message(tool_calls=[tool_call("search_text", {"query": "target"}, "valid-search")]),
-        model_message(tool_calls=[tool_call("read_file", {"path": "module.py"}, "valid-read")]),
+        model_message(
+            tool_calls=[
+                tool_call("search_text", {"query": ""}, "invalid-empty"),
+                tool_call("search_text", {"query": invalid_long_query}, "invalid-long"),
+                tool_call("search_text", {"query": None}, "invalid-type"),
+            ],
+            reasoning="MODEL_REASONING_MUST_NOT_BE_REPLAYED",
+        ),
+        model_message(
+            tool_calls=[tool_call("search_text", {"query": "target"}, "valid-search")],
+            reasoning="MODEL_REASONING_MUST_NOT_BE_REPLAYED",
+        ),
+        model_message(
+            tool_calls=[tool_call("read_file", {"path": "module.py"}, "valid-read")],
+            reasoning="MODEL_REASONING_MUST_NOT_BE_REPLAYED",
+        ),
         model_message(content="The inspected file defines target and returns 'evidence'."),
     ])
     app.state.provider = model
 
-    response = client.post("/agent/inspect", json={"question": "What does target return?"})
+    with caplog.at_level("WARNING", logger="app.agent_inspect"):
+        response = client.post("/agent/inspect", json={"question": "What does target return?"})
 
     assert response.status_code == 200
     assert response.json() == {"answer": "The inspected file defines target and returns 'evidence'."}
-    assert [request["tool_choice"] for request in model.requests] == ["auto"] * 4 + ["none"]
-    assert len(model.requests) == MAX_MODEL_TURNS
-    final_tool_messages = [
-        message
-        for message in model.requests[-1]["messages"]
-        if message.get("role") == "tool"
+    assert [request["tool_choice"] for request in model.requests] == ["auto"] * 4
+    first_followup = model.requests[1]["messages"]
+    assistant_call = first_followup[-4]
+    assert assistant_call["role"] == "assistant"
+    assert "reasoning" not in assistant_call
+    assert [call["id"] for call in assistant_call["tool_calls"]] == [
+        "invalid-empty", "invalid-long", "invalid-type"
     ]
-    assert len(final_tool_messages) == 4
-    assert sum('"code":"invalid_arguments"' in message["content"] for message in final_tool_messages) == 2
-    assert "module.py" in final_tool_messages[-1]["content"]
+    tool_results = first_followup[-3:]
+    assert all(result["role"] == "tool" for result in tool_results)
+    assert [result["tool_call_id"] for result in tool_results] == [
+        "invalid-empty", "invalid-long", "invalid-type"
+    ]
+    reason_by_call = {
+        result["tool_call_id"]: json.loads(result["content"])["tool_error"]["reason"]
+        for result in tool_results
+    }
+    assert reason_by_call == {
+        "invalid-empty": "query_empty",
+        "invalid-long": "query_too_long",
+        "invalid-type": "query_type",
+    }
+    assert [record.getMessage().split("reason=")[-1] for record in caplog.records] == [
+        "query_empty", "query_too_long", "query_type"
+    ]
+    assert invalid_long_query not in caplog.text
+    for request in model.requests[1:]:
+        assert all("reasoning" not in message for message in request["messages"])
+    assert "module.py" in model.requests[3]["messages"][-1]["content"]
 
 
 def test_insufficient_evidence_answer_follows_empty_search(inspector):
@@ -587,6 +619,8 @@ def test_groq_tool_method_uses_supported_async_request_shape(monkeypatch):
     ],
 )
 def test_groq_errors_log_only_sdk_metadata(monkeypatch, caplog, status, sdk_error_name, expected_category, expected_error):
+    assert "status_code" in groq.BadRequestError.__annotations__
+    assert "code" not in groq.BadRequestError.__annotations__
     request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
     response = httpx.Response(status, request=request)
     error_type = getattr(groq, sdk_error_name)

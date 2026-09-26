@@ -68,9 +68,10 @@ class AgentInspectError(RuntimeError):
 
 
 class InvalidToolArguments(AgentInspectError):
-    def __init__(self, tool_name: str):
+    def __init__(self, tool_name: str, reason: str):
         super().__init__("Invalid tool arguments")
         self.tool_name = tool_name
+        self.reason = reason
 
 
 class ToolCallingProvider(Protocol):
@@ -204,19 +205,19 @@ def _reject_json_constant(value: str) -> None:
 
 def _parse_arguments(raw_arguments: object, tool_name: str) -> dict[str, object]:
     if not isinstance(raw_arguments, str):
-        raise InvalidToolArguments(tool_name)
+        raise InvalidToolArguments(tool_name, "arguments_type")
     try:
         if len(raw_arguments.encode("utf-8")) > MAX_TOOL_ARGUMENT_BYTES:
-            raise InvalidToolArguments(tool_name)
+            raise InvalidToolArguments(tool_name, "arguments_too_large")
         arguments = json.loads(
             raw_arguments,
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_json_constant,
         )
     except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
-        raise InvalidToolArguments(tool_name) from exc
+        raise InvalidToolArguments(tool_name, "json_invalid") from exc
     if not isinstance(arguments, dict):
-        raise InvalidToolArguments(tool_name)
+        raise InvalidToolArguments(tool_name, "arguments_not_object")
     return arguments
 
 
@@ -269,24 +270,28 @@ def _validate_arguments(
         raise AgentInspectError("Unknown tool")
     allowed_keys, required_keys = allowed[name]
     if set(arguments) - allowed_keys or required_keys - set(arguments):
-        raise InvalidToolArguments(name)
+        raise InvalidToolArguments(name, "arguments_schema")
 
     path = arguments.get("path", ".")
     if name != "git_review" and (
         not isinstance(path, str) or not path or len(path) > MAX_PATH_CHARS
     ):
-        raise InvalidToolArguments(name)
+        raise InvalidToolArguments(name, "path_format")
     if name == "search_text":
         query = arguments["query"]
-        if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_CHARS:
-            raise InvalidToolArguments(name)
+        if not isinstance(query, str):
+            raise InvalidToolArguments(name, "query_type")
+        if not query.strip():
+            raise InvalidToolArguments(name, "query_empty")
+        if len(query) > MAX_QUERY_CHARS:
+            raise InvalidToolArguments(name, "query_too_long")
     if name == "read_file":
         start_line = arguments.get("start_line", 1)
         max_lines = arguments.get("max_lines", 80)
         if type(start_line) is not int or start_line < 1:
-            raise InvalidToolArguments(name)
+            raise InvalidToolArguments(name, "line_range")
         if type(max_lines) is not int or not 1 <= max_lines <= MAX_READ_LINES:
-            raise InvalidToolArguments(name)
+            raise InvalidToolArguments(name, "line_range")
         arguments = {**arguments, "start_line": start_line, "max_lines": max_lines}
     if name == "list_files" and "path" not in arguments:
         arguments = {**arguments, "path": "."}
@@ -296,12 +301,12 @@ def _validate_arguments(
         try:
             _validate_project_scope(project_root, arguments["path"])
         except (OSError, RuntimeError, ProjectPathError, ValueError) as exc:
-            raise InvalidToolArguments(name) from exc
+            raise InvalidToolArguments(name, "path_scope") from exc
     if name == "read_file":
         try:
             editor._resolve_target(arguments["path"])
         except FileEditError as exc:
-            raise InvalidToolArguments(name) from exc
+            raise InvalidToolArguments(name, "path_scope") from exc
     return arguments
 
 
@@ -310,7 +315,7 @@ def _validate_tool_call(
     available_tools: set[str],
     project_root: Path,
     editor: ProjectFileEditor,
-) -> tuple[str, str, str, dict[str, object] | None]:
+) -> tuple[str, str, str, dict[str, object] | None, str | None]:
     call_id = _get_field(call, "id")
     call_type = _get_field(call, "type")
     function = _get_field(call, "function")
@@ -332,12 +337,12 @@ def _validate_tool_call(
             project_root,
             editor,
         )
-    except InvalidToolArguments:
-        return call_id, name, history_arguments, None
-    return call_id, name, history_arguments, arguments
+    except InvalidToolArguments as exc:
+        return call_id, name, history_arguments, None, exc.reason
+    return call_id, name, history_arguments, arguments, None
 
 
-def _invalid_tool_content(tool_name: str) -> str:
+def _invalid_tool_content(tool_name: str, reason: str) -> str:
     accepted = {
         "list_files": "{} or {path: existing, non-excluded relative directory (1-1024 chars)}",
         "search_text": "{query: non-blank string (1-160 chars), path?: existing non-excluded relative directory (1-1024 chars)}",
@@ -348,6 +353,7 @@ def _invalid_tool_content(tool_name: str) -> str:
         {
             "tool_error": {
                 "code": "invalid_arguments",
+                "reason": reason,
                 "tool": tool_name,
                 "accepted": accepted,
             }
@@ -481,18 +487,18 @@ async def inspect_project_question(
                     "type": "function",
                     "function": {"name": name, "arguments": raw_arguments},
                 }
-                for call_id, name, raw_arguments, _ in validated_calls
+                for call_id, name, raw_arguments, _, _ in validated_calls
             ],
         }
-        reasoning = _get_field(model_message, "reasoning")
-        if isinstance(reasoning, str):
-            assistant_message["reasoning"] = reasoning
-
         tool_messages: list[dict[str, object]] = []
-        for call_id, name, _, arguments in validated_calls:
+        for call_id, name, _, arguments, invalid_reason in validated_calls:
             if arguments is None:
-                logger.warning("agent inspect tool error category=invalid_arguments")
-                content = _invalid_tool_content(name)
+                reason = invalid_reason or "arguments_invalid"
+                logger.warning(
+                    "agent inspect tool error category=invalid_arguments reason=%s",
+                    reason,
+                )
+                content = _invalid_tool_content(name, reason)
             else:
                 tool_result = await asyncio.to_thread(
                     _dispatch_tool,
