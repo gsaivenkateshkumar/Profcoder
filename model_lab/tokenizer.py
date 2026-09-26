@@ -20,7 +20,7 @@ def encode(text: str, *, add_bos: bool = False, add_eos: bool = False) -> list[i
     return ids
 
 
-def decode(ids: Iterable[int], *, skip_special: bool = False) -> str:
+def decode(ids: Iterable[int], *, skip_special: bool = False, errors: str = "strict") -> str:
     raw = bytearray()
     for token_id in ids:
         if type(token_id) is not int or not 0 <= token_id < VOCAB_SIZE:
@@ -30,4 +30,4 @@ def decode(ids: Iterable[int], *, skip_special: bool = False) -> str:
                 raise ValueError("special token encountered; pass skip_special=True")
             continue
         raw.append(token_id)
-    return raw.decode("utf-8", errors="strict")
+    return raw.decode("utf-8", errors=errors)

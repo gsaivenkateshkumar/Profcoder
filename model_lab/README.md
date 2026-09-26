@@ -73,6 +73,32 @@ general coding ability. The training data are too short for 128-token validation
 windows, so the default training sequence is **64** tokens. Sampled training
 windows may cross document boundaries in this toy milestone.
 
+First measured `train-v1` run (i5-10400F, 6 threads, 2026-09-27): 100 steps,
+51,200 training tokens, 6.2 s invocation wall time, about 11,500 training
+tokens/second, 347 MB peak process RAM, 22.6 MB checkpoint, final train loss
+0.52 and validation loss 3.49. The gap shows memorization of the tiny demo
+corpus; these are toy-corpus measurements, not evidence of coding ability.
+
+## Offline generation milestone
+
+`model_lab.generate` loads a checkpoint written by `model_lab.train` (with
+`weights_only=True`), rebuilds the model from its saved configuration, and
+continues a prompt on the CPU. It is not connected to the Groq application or
+the API.
+
+```powershell
+& F:\profcoder-model-venv\Scripts\python.exe -m model_lab.generate --checkpoint model_lab/runs/train-v1/checkpoint.pt --prompt "def add(a, b):" --max-new-tokens 64
+& F:\profcoder-model-venv\Scripts\python.exe -m unittest discover -s tests -p test_model_generation.py -v
+```
+
+Prompts are limited to 4,096 UTF-8 bytes and output to 1–512 new tokens; only
+the most recent context-length tokens are fed to the model. Decoding is greedy
+unless `--temperature` (up to 2.0) is set, optionally with `--top-k` and
+`--seed`. Generation stops at EOS, which is not included in the output; BOS and
+padding are never produced. Because training documents are raw bytes followed by
+EOS, the prompt is not prefixed with BOS. Invalid UTF-8 byte sequences are
+shown as U+FFFD. Expect repetitive, fragmentary text from the demo model.
+
 ## Training target and budget (estimates until measured on the server)
 
 - First **randomly initialized** decoder-only Transformer: 4 layers, width
@@ -97,15 +123,15 @@ windows may cross document boundaries in this toy milestone.
 
 ## Next milestones
 
-1. Run the smoke and bounded training on the Windows server to measure
-   throughput, wall time, RAM, loss, and checkpoint size before increasing the
-   budget. Do not use the GT 710 for this baseline.
+1. Review the measured `train-v1` baseline (throughput, wall time, RAM, loss,
+   checkpoint size) before increasing the budget. Do not use the GT 710 for
+   this baseline.
 2. Expand to
    carefully reviewed, deduplicated original/permissively licensed code,
    splitting by source project so evaluation is genuinely held out.
-3. Add offline CPU generation and compare latency/quality with a separate,
-   existing open-weight model in Profcoder. Consider quantization after the
-   baseline works. Consider sparse experts and disk streaming only if actual
+3. Compare offline CPU generation latency/quality with a separate, existing
+   open-weight model in Profcoder. Consider quantization only after the
+   measured baseline has been reviewed. Consider sparse experts and disk streaming only if actual
    measurements show a benefit.
 
 Proposed repository layout: `model_lab/` holds this experimental pipeline and
