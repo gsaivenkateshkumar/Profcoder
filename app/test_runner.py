@@ -12,7 +12,7 @@ from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from app.project_files import _is_excluded
+from app.project_files import _is_excluded, _is_reparse_point, _is_within
 
 
 MAX_TIMEOUT_SECONDS = 300.0
@@ -296,7 +296,30 @@ class ProjectTestRunner:
         )
 
 
-def _reviewable_git_paths(name_output: bytes) -> list[str]:
+def _path_stays_inside_root(root: Path, parts: list[str]) -> bool:
+    current = root
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError:
+            return False
+        if _is_reparse_point(metadata):
+            return False
+        try:
+            resolved = current.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return False
+        if _is_excluded(resolved.name, is_directory=index < len(parts) - 1):
+            return False
+        if not _is_within(root, resolved):
+            return False
+    return True
+
+
+def _reviewable_git_paths(name_output: bytes, root: Path) -> list[str]:
     paths: list[str] = []
     for raw_path in name_output.split(b"\x00"):
         if not raw_path:
@@ -310,10 +333,25 @@ def _reviewable_git_paths(name_output: bytes) -> list[str]:
             or ":" in relative_path
             or ".." in parts
             or any(_is_excluded(part, is_directory=index < len(parts) - 1) for index, part in enumerate(parts))
+            or not _path_stays_inside_root(root, parts)
         ):
             continue
         paths.append(relative_path)
     return paths
+
+
+def _filtered_git_status(status_output: bytes, root: Path) -> str:
+    visible_lines: list[str] = []
+    for record in status_output.split(b"\x00"):
+        if not record:
+            continue
+        if len(record) < 4 or record[2:3] != b" ":
+            continue
+        status_code = record[:2].decode("ascii", errors="replace")
+        path = record[3:]
+        if _reviewable_git_paths(path + b"\x00", root):
+            visible_lines.append(f"{status_code} {os.fsdecode(path)}")
+    return "\n".join(visible_lines)
 
 
 class GitChangeReader:
@@ -362,11 +400,13 @@ class GitChangeReader:
 
     def read(self, project_root: Path) -> GitReviewResult:
         root = _resolve_project_root(project_root)
-        status = self._git(root, ("status", "--short", "--branch", "--untracked-files=normal"))
-        status_text = status.stdout.decode("utf-8", errors="replace")
+        status = self._git(root, ("status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"))
         truncated = status.stdout_truncated or status.stderr_truncated
         if status.launch_error or status.timed_out or status.exit_code != 0:
-            return GitReviewResult(status_text, "", "", truncated, "git_status_failed")
+            return GitReviewResult("", "", "", truncated, "git_status_failed")
+        if truncated:
+            return GitReviewResult("", "", "", True, None)
+        status_text = _filtered_git_status(status.stdout, root)
 
         working_names = self._git(root, ("diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv"))
         staged_names = self._git(root, ("diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv"))
@@ -377,8 +417,8 @@ class GitChangeReader:
         if truncated:
             return GitReviewResult(status_text, "", "", True, None)
 
-        working_paths = _reviewable_git_paths(working_names.stdout)
-        staged_paths = _reviewable_git_paths(staged_names.stdout)
+        working_paths = _reviewable_git_paths(working_names.stdout, root)
+        staged_paths = _reviewable_git_paths(staged_names.stdout, root)
         working_diff = self._read_diff(root, working_paths, staged=False)
         staged_diff = self._read_diff(root, staged_paths, staged=True)
         truncated = truncated or working_diff.stdout_truncated or working_diff.stderr_truncated

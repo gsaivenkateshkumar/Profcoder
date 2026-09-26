@@ -202,6 +202,22 @@ class ProjectFileEditor:
             raise StaleFileError("File changed while it was being read")
         return checked_target, content, checked
 
+    def read_text(self, relative_path: str) -> str:
+        _, content, _ = self._read_target(relative_path)
+        if b"\x00" in content:
+            raise UnsupportedTextError("Binary files cannot be read as text")
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise UnsupportedTextError("Only UTF-8 text files can be read") from exc
+        if any(
+            (ord(character) < 32 and character not in "\t\n\r\f")
+            or ord(character) == 127
+            for character in text
+        ):
+            raise UnsupportedTextError("Binary control characters cannot be read as text")
+        return text
+
     def preview(
         self,
         relative_path: str,

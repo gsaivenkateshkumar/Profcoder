@@ -54,9 +54,29 @@ GET http://127.0.0.1:8001/project/search?q=TODO&path=src
 
 Search returns relative paths, one-based line numbers, and bounded excerpts. The
 read-only endpoints exclude credentials, environment files, VCS data, virtual
-environments, caches, binary and oversized files; indexed content is not sent to
-Groq. Requests are bounded by path, scan, file, result, and excerpt limits. If
-`REPO_ROOT` is unset or invalid, these endpoints return `503`.
+environments, caches, binary and oversized files. They do not send indexed
+content automatically. Requests are bounded by path, scan, file, result, and
+excerpt limits. If `REPO_ROOT` is unset or invalid, these endpoints return `503`.
+
+## Local project inspection
+`POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and
+uses Groq function calling with read-only project listing, text search, safe
+text-file reading, and (when configured) bounded Git review. Set
+`PROFCODER_GIT_EXECUTABLE` to an absolute Git executable path to enable Git
+review; leave it unset to omit that tool. The endpoint has no editing, rollback,
+test-running, shell, or web-research tools.
+
+Retrieved source snippets and selected Git diffs are included in the online Groq
+conversation to answer the question. Use only project roots whose readable code
+you are willing to send to Groq. Requests are capped at 12 KiB, five model turns,
+six tool calls, 64 KiB serialized context, and a 12 KiB JSON response. File reads
+are limited to 100 lines and 6 KiB of text. The API remains bound to `127.0.0.1`.
+
+```powershell
+$body = @{ question = "Where is the chat route defined?" } | ConvertTo-Json
+Invoke-RestMethod -Uri http://127.0.0.1:8001/agent/inspect `
+	-Method Post -ContentType application/json -Body $body
+```
 
 ## Internal file-editing interface
 `app.file_edits.ProjectFileEditor` is an internal Python interface only. It adds

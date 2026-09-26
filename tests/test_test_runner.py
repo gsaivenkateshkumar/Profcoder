@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -127,7 +128,7 @@ def test_git_reader_uses_fixed_commands_and_excludes_sensitive_paths(tmp_path, m
         calls.append(args)
         assert "GIT_DIR" not in kwargs["environment"]
         if "status" in args:
-            output = b"## main\n M src/example.py\n"
+            output = b" M src/example.py\x00 M .env\x00"
         elif "--name-only" in args and "--cached" not in args:
             output = b"src/example.py\x00.env\x00"
         elif "--name-only" in args:
@@ -142,7 +143,8 @@ def test_git_reader_uses_fixed_commands_and_excludes_sensitive_paths(tmp_path, m
     reader = GitChangeReader(Path(sys.executable))
     result = reader.read(tmp_path)
 
-    assert result.status == "## main\n M src/example.py\n"
+    assert result.status == " M src/example.py"
+    assert ".env" not in result.status
     assert result.working_diff == "working diff"
     assert result.staged_diff == "staged diff"
     assert not result.truncated
@@ -168,6 +170,51 @@ def test_git_reader_stops_when_name_list_is_truncated(tmp_path, monkeypatch):
     assert result.truncated
     assert result.working_diff == ""
     assert result.staged_diff == ""
+
+
+def test_git_reader_skips_diff_paths_through_outside_junction(tmp_path, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows junctions are unavailable")
+    root = tmp_path / "project"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not displayed", encoding="utf-8")
+    junction = root / "linked"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("Windows directory junction creation is unavailable")
+
+    calls = []
+
+    def fake_capture(arguments, **kwargs):
+        args = tuple(arguments)
+        calls.append(args)
+        if "status" in args:
+            output = b" M linked/secret.txt\x00"
+        elif "--name-only" in args:
+            output = b"linked/secret.txt\x00"
+        else:
+            output = b"outside content"
+        return _ProcessCapture(0, output, b"", False, False, False, None, 0.01)
+
+    try:
+        monkeypatch.setattr("app.test_runner._capture_process", fake_capture)
+        result = GitChangeReader(Path(sys.executable)).read(root)
+        assert result.status == ""
+        assert result.working_diff == ""
+        assert result.staged_diff == ""
+        assert not any("diff" in args and "--name-only" not in args for args in calls)
+    finally:
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+            capture_output=True,
+            check=False,
+        )
 
 
 def test_preset_and_runner_limits_are_enforced(tmp_path):

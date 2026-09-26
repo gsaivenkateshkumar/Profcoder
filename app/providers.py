@@ -102,3 +102,43 @@ class GroqProvider(ChatProvider):
                 raise MissingKeyError("Groq key missing or invalid") from exc
             logger.warning("Groq provider error category=request")
             raise ProviderError("Groq request failed") from exc
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+        *,
+        max_completion_tokens: int,
+    ) -> object:
+        try:
+            import groq
+        except ImportError as exc:
+            logger.warning("Groq provider error category=dependency")
+            raise ProviderError("Groq client dependency not installed") from exc
+
+        try:
+            if self._client is None:
+                self._client = groq.AsyncGroq(api_key=self.api_key, timeout=self.timeout)
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                temperature=0.2,
+                max_completion_tokens=max_completion_tokens,
+            )
+            return response.choices[0].message
+        except Exception as exc:
+            lower = str(exc).lower()
+            if "timeout" in lower:
+                logger.warning("Groq provider error category=timeout")
+                raise ProviderTimeoutError("Groq request timed out") from exc
+            if "rate limit" in lower or "429" in lower:
+                logger.warning("Groq provider error category=rate_limit")
+                raise ProviderRateLimitError("Groq rate limit exceeded") from exc
+            if "missing" in lower or "api key" in lower or "unauthorized" in lower:
+                logger.warning("Groq provider error category=authentication")
+                raise MissingKeyError("Groq key missing or invalid") from exc
+            logger.warning("Groq provider error category=request")
+            raise ProviderError("Groq request failed") from exc

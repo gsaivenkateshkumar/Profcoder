@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import os
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field, ValidationError
 
+from app.agent_inspect import (
+    MAX_AGENT_REQUEST_BYTES,
+    AgentInspectError,
+    AgentInspectRequest,
+    inspect_project_question,
+)
 from app.providers import (
     ChatMessage,
     ChatProvider,
@@ -27,6 +34,7 @@ from app.project_files import (
     list_project_files,
     search_project_files,
 )
+from app.test_runner import GitChangeReader
 
 
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
@@ -49,9 +57,29 @@ def build_provider() -> ChatProvider:
     return GroqProvider(api_key=api_key, model=model)
 
 
+def build_git_reader() -> GitChangeReader | None:
+    executable = os.getenv("PROFCODER_GIT_EXECUTABLE", "").strip()
+    if not executable:
+        return None
+    path = Path(executable).expanduser()
+    if not path.is_absolute():
+        return None
+    try:
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not path.is_file():
+        return None
+    try:
+        return GitChangeReader(path, timeout_seconds=5.0, output_limit_bytes=4096)
+    except ValueError:
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.provider = build_provider()
+    app.state.git_reader = build_git_reader()
     project_root = os.getenv("REPO_ROOT", "").strip()
     try:
         app.state.project_root = Path(project_root).expanduser().resolve(strict=True) if project_root else None
@@ -94,6 +122,60 @@ def project_search(
         return search_project_files(require_project_root(), q, path)
     except ProjectPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _read_bounded_body(request: Request) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        if not content_length.isdecimal():
+            raise HTTPException(status_code=400, detail="Invalid request size")
+        if int(content_length) > MAX_AGENT_REQUEST_BYTES:
+            raise HTTPException(status_code=413, detail="Request is too large")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_AGENT_REQUEST_BYTES:
+            raise HTTPException(status_code=413, detail="Request is too large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+@app.post("/agent/inspect")
+async def agent_inspect(request: Request):
+    project_root = getattr(app.state, "project_root", None)
+    if project_root is None:
+        raise HTTPException(status_code=503, detail="Project root is not configured")
+    provider = getattr(app.state, "provider", None)
+    if not callable(getattr(provider, "chat_with_tools", None)):
+        raise HTTPException(status_code=503, detail="Groq tool calling is not configured")
+
+    body = await _read_bounded_body(request)
+    try:
+        payload = json.loads(body)
+        inspect_request = AgentInspectRequest.model_validate(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValidationError):
+        raise HTTPException(status_code=422, detail="Invalid inspect request")
+
+    try:
+        answer = await inspect_project_question(
+            provider,
+            project_root,
+            inspect_request.question,
+            git_reader=getattr(app.state, "git_reader", None),
+        )
+    except ProviderTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Groq request timed out") from exc
+    except ProviderRateLimitError as exc:
+        raise HTTPException(status_code=429, detail="Groq rate limit exceeded") from exc
+    except MissingKeyError as exc:
+        raise HTTPException(status_code=503, detail="Groq key missing or invalid") from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail="Groq request failed") from exc
+    except AgentInspectError as exc:
+        raise HTTPException(status_code=502, detail="Agent inspection could not be completed") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="internal server error") from exc
+    return JSONResponse(content={"answer": answer})
 
 
 @app.post("/chat")
