@@ -52,8 +52,10 @@ def _sample_bytes(root: Path, relative_name: str) -> bytes:
     data = candidate.read_bytes()
     if len(data) > MAX_FILE_BYTES or b"\x00" in data:
         raise ValueError("sample is oversized or contains NUL bytes")
-    data.decode("utf-8", errors="strict")
-    return data
+    text = data.decode("utf-8", errors="strict")
+    # Git may check out tracked text with CRLF on Windows. Hash and tokenize
+    # canonical UTF-8 LF content so the same manifest works on both platforms.
+    return text.replace("\r\n", "\n").encode("utf-8")
 
 
 def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
@@ -128,12 +130,14 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
         "format": "uint16-le",
         "tokenizer": TOKENIZER_VERSION,
         "vocab_size": VOCAB_SIZE,
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "manifest_sha256": hashlib.sha256(
+            manifest_bytes.replace(b"\r\n", b"\n")
+        ).hexdigest(),
         "tokens": token_counts,
         "source_bytes": total_bytes,
     }
-    (output_dir / "metadata.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    (output_dir / "metadata.json").write_bytes(
+        (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )
     return metadata
 

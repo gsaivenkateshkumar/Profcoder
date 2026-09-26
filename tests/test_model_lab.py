@@ -49,8 +49,8 @@ class CorpusTests(unittest.TestCase):
         self.write_manifest()
 
     def write_manifest(self):
-        self.manifest.write_text(
-            json.dumps({"version": 1, "samples": self.items}), encoding="utf-8"
+        self.manifest.write_bytes(
+            (json.dumps({"version": 1, "samples": self.items}, indent=2) + "\n").encode("utf-8")
         )
 
     def test_verified_corpus_is_deterministic_and_not_overwritten(self):
@@ -65,6 +65,20 @@ class CorpusTests(unittest.TestCase):
             self.assertEqual(list(ids), encode(original.decode("utf-8"), add_eos=True))
         with self.assertRaises(FileExistsError):
             prepare(self.manifest, first)
+
+    def test_windows_crlf_checkout_matches_lf_corpus_and_metadata(self):
+        first = self.root / "lf"
+        second = self.root / "crlf"
+        metadata = prepare(self.manifest, first)
+        for split, data in self.samples.items():
+            (self.root / f"samples/{split}.txt").write_bytes(
+                data.replace(b"\n", b"\r\n")
+            )
+        self.manifest.write_bytes(self.manifest.read_bytes().replace(b"\n", b"\r\n"))
+        self.assertIn(b"\r\n", self.manifest.read_bytes())
+        self.assertEqual(prepare(self.manifest, second), metadata)
+        for filename in ("train.u16le", "validation.u16le", "metadata.json"):
+            self.assertEqual((first / filename).read_bytes(), (second / filename).read_bytes())
 
     def test_tampering_and_unreviewed_rights_are_rejected(self):
         (self.root / "samples/train.txt").write_text("altered", encoding="utf-8")

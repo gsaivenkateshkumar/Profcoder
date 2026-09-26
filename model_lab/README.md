@@ -18,7 +18,9 @@ From the repository root, using its Python environment:
 The first command reads only files explicitly listed in
 `model_lab/data/manifest.json`. Every sample needs a manually reviewed source,
 license identifier, explicit rights review, and matching SHA-256. The program
-rejects duplicate samples, symlinks/junctions, paths outside `samples/`, files
+computes each SHA-256 over UTF-8 content with CRLF normalized to LF, so a Git
+checkout on Windows produces the same token data and metadata as on Linux.
+It rejects duplicate samples, symlinks/junctions, paths outside `samples/`, files
 above 1 MiB, and corpora above 16 MiB. It writes `train.u16le`,
 `validation.u16le`, and `metadata.json` to the ignored `model_lab/runs/demo-v1`
 directory. Choose another `--output` directory for a repeat run; existing
