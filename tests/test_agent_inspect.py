@@ -43,11 +43,12 @@ class FakeToolModel:
         self.responses = list(responses)
         self.requests = []
 
-    async def chat_with_tools(self, messages, tools, *, max_completion_tokens):
+    async def chat_with_tools(self, messages, tools, *, max_completion_tokens, tool_choice="auto"):
         self.requests.append({
             "messages": messages,
             "tools": tools,
             "max_completion_tokens": max_completion_tokens,
+            "tool_choice": tool_choice,
         })
         if not self.responses:
             raise AssertionError("unexpected model turn")
@@ -85,6 +86,8 @@ def test_inspect_passes_list_search_and_read_results_to_model(inspector):
     assert response.status_code == 200
     assert response.json() == {"answer": "The answer function returns 42."}
     assert len(model.requests) == 4
+    assert [request["tool_choice"] for request in model.requests] == ["auto"] * 4
+    assert "insufficient" in model.requests[0]["messages"][0]["content"]
     assert model.requests[1]["messages"][-1]["role"] == "tool"
     assert model.requests[1]["messages"][-1]["tool_call_id"] == "list-1"
     assert "src/logic.py" in model.requests[1]["messages"][-1]["content"]
@@ -211,7 +214,7 @@ def test_malformed_json_arguments_return_structured_error_and_retry(inspector):
     assert "query" in error_payload["tool_error"]["accepted"]
 
 
-def test_repeated_invalid_calls_count_toward_tool_call_limit(inspector):
+def test_repeated_invalid_calls_consume_budget_and_force_final_turn(inspector):
     client, _ = inspector
     invalid_calls = [
         tool_call("search_text", {"query": ""}, f"invalid-{index}")
@@ -219,14 +222,17 @@ def test_repeated_invalid_calls_count_toward_tool_call_limit(inspector):
     ]
     model = FakeToolModel([
         model_message(tool_calls=invalid_calls),
-        model_message(tool_calls=[tool_call("list_files", {}, "over-limit")]),
+        model_message(content="I cannot complete another search within the tool limit."),
     ])
     app.state.provider = model
 
     response = client.post("/agent/inspect", json={"question": "Search."})
 
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.json() == {"answer": "I cannot complete another search within the tool limit."}
     assert len(model.requests) == 2
+    assert model.requests[0]["tool_choice"] == "auto"
+    assert model.requests[1]["tool_choice"] == "none"
     returned_errors = [
         message
         for message in model.requests[1]["messages"]
@@ -234,6 +240,77 @@ def test_repeated_invalid_calls_count_toward_tool_call_limit(inspector):
     ]
     assert len(returned_errors) == MAX_TOOL_CALLS
     assert all('"code":"invalid_arguments"' in message["content"] for message in returned_errors)
+
+
+def test_reported_invalid_invalid_search_read_file_sequence_finishes(inspector):
+    client, root = inspector
+    (root / "module.py").write_text("def target():\n    return 'evidence'\n", encoding="utf-8")
+    invalid_long_query = "x" * (MAX_QUERY_CHARS + 1)
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("search_text", {"query": ""}, "invalid-short")]),
+        model_message(tool_calls=[tool_call("search_text", {"query": invalid_long_query}, "invalid-long")]),
+        model_message(tool_calls=[tool_call("search_text", {"query": "target"}, "valid-search")]),
+        model_message(tool_calls=[tool_call("read_file", {"path": "module.py"}, "valid-read")]),
+        model_message(content="The inspected file defines target and returns 'evidence'."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "What does target return?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "The inspected file defines target and returns 'evidence'."}
+    assert [request["tool_choice"] for request in model.requests] == ["auto"] * 4 + ["none"]
+    assert len(model.requests) == MAX_MODEL_TURNS
+    final_tool_messages = [
+        message
+        for message in model.requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert len(final_tool_messages) == 4
+    assert sum('"code":"invalid_arguments"' in message["content"] for message in final_tool_messages) == 2
+    assert "module.py" in final_tool_messages[-1]["content"]
+
+
+def test_insufficient_evidence_answer_follows_empty_search(inspector):
+    client, _ = inspector
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("search_text", {"query": "missing_symbol"}, "empty-search")]),
+        model_message(content="I could not find that symbol, so I do not have enough evidence to answer."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "What does missing_symbol do?"})
+
+    assert response.status_code == 200
+    assert "do not have enough evidence" in response.json()["answer"]
+    search_result = json.loads(model.requests[1]["messages"][-1]["content"])
+    assert search_result["result"]["results"] == []
+
+
+def test_final_turn_refuses_tool_calls_even_if_model_ignores_none(inspector, monkeypatch):
+    client, _ = inspector
+    dispatches = []
+    original_list = __import__("app.agent_inspect", fromlist=["list_project_files"]).list_project_files
+
+    def list_spy(project_root, path):
+        dispatches.append(path)
+        return original_list(project_root, path)
+
+    monkeypatch.setattr("app.agent_inspect.list_project_files", list_spy)
+    model = FakeToolModel([
+        *[
+            model_message(tool_calls=[tool_call("list_files", {}, f"before-final-{index}")])
+            for index in range(MAX_MODEL_TURNS - 1)
+        ],
+        model_message(tool_calls=[tool_call("list_files", {}, "forbidden-final")]),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "List files."})
+
+    assert response.status_code == 502
+    assert model.requests[-1]["tool_choice"] == "none"
+    assert len(dispatches) == MAX_MODEL_TURNS - 1
 
 
 def test_inspect_never_uses_non_read_tools_or_exceeds_turn_limit(inspector):
@@ -362,10 +439,11 @@ def test_groq_tool_method_uses_supported_async_request_shape(monkeypatch):
         [{"role": "user", "content": "question"}],
         tools,
         max_completion_tokens=32,
+        tool_choice="none",
     ))
 
     assert result is response_message
     assert captured["tools"] == tools
-    assert captured["tool_choice"] == "auto"
+    assert captured["tool_choice"] == "none"
     assert captured["parallel_tool_calls"] is False
     assert captured["max_completion_tokens"] == 32
