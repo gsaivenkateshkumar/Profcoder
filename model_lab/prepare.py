@@ -20,6 +20,109 @@ MAX_TOTAL_BYTES = 16 * 1024 * 1024
 SPLITS = ("train", "validation")
 SAMPLE_FIELDS = {"path", "split", "sha256", "license", "source", "rights_reviewed"}
 PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+LICENSE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{1,63}")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+REPOSITORY = re.compile(r"https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._-]+)+")
+PUBLIC_LICENSE = "public-license"
+OWNER_AUTHORIZED = "owner-authorized-local-use"
+V3_PROJECT_FIELDS = {
+    "split", "repository", "commit", "rights_basis", "license", "authorized_by",
+    "rights_reviewed",
+}
+V3_SAMPLE_FIELDS = {"path", "project", "source_path", "sha256", "transform"}
+TRANSFORMS = ("verbatim", "redacted")
+
+
+def _version_3_samples(
+    manifest: dict[str, object],
+) -> tuple[list[tuple[str, str, str, str]], dict[str, dict[str, object]]]:
+    """Validate per-project provenance and rights; return (path, split, sha256, project).
+
+    Rights are either a public license (an SPDX-style ID) or the owner's
+    authorization for local use only, which records no license at all.
+    """
+    projects, samples = manifest.get("projects"), manifest.get("samples")
+    if set(manifest) != {"version", "projects", "samples"} or not isinstance(projects, dict):
+        raise ValueError("version 3 manifest needs projects and samples")
+    if not 2 <= len(projects) <= MAX_SAMPLES:
+        raise ValueError("manifest needs a bounded set of projects")
+    repositories: set[str] = set()
+    for name, project in projects.items():
+        if not PROJECT_ID.fullmatch(name):
+            raise ValueError("project must be a lowercase identifier")
+        if not isinstance(project, dict) or set(project) != V3_PROJECT_FIELDS:
+            raise ValueError("invalid project manifest fields")
+        if project["split"] not in SPLITS or type(project["split"]) is not str:
+            raise ValueError("unsupported split")
+        repository, commit = project["repository"], project["commit"]
+        if (
+            type(repository) is not str or len(repository) > 256
+            or not REPOSITORY.fullmatch(repository)
+            or type(commit) is not str or not COMMIT.fullmatch(commit)
+        ):
+            raise ValueError("project requires an https source repository and full commit hash")
+        # One repository under two project names would let it leak across splits.
+        key = repository.lower().removesuffix(".git")
+        if key in repositories:
+            raise ValueError("source repository is assigned to more than one project")
+        repositories.add(key)
+        basis, license_id, authorized_by = (
+            project["rights_basis"], project["license"], project["authorized_by"]
+        )
+        if project["rights_reviewed"] is not True:
+            raise ValueError("project rights must be reviewed")
+        if basis == PUBLIC_LICENSE:
+            valid = (
+                type(license_id) is str and bool(LICENSE_ID.fullmatch(license_id))
+                and authorized_by is None
+            )
+        elif basis == OWNER_AUTHORIZED:
+            valid = (
+                license_id is None and type(authorized_by) is str
+                and bool(authorized_by.strip()) and len(authorized_by) <= 256
+            )
+        else:
+            raise ValueError("unsupported rights basis")
+        if not valid:
+            raise ValueError(
+                "public-license rights need a license ID; owner-authorized local use "
+                "needs authorized_by and no license"
+            )
+
+    if not isinstance(samples, list) or not 2 <= len(samples) <= MAX_SAMPLES:
+        raise ValueError("manifest needs a bounded list of samples")
+    result = []
+    sources: set[tuple[str, str]] = set()
+    for item in samples:
+        if not isinstance(item, dict) or set(item) != V3_SAMPLE_FIELDS:
+            raise ValueError("invalid sample manifest fields")
+        project, source_path = item["project"], item["source_path"]
+        if type(project) is not str or project not in projects:
+            raise ValueError("sample names an undeclared project")
+        pure = PurePosixPath(source_path) if type(source_path) is str else None
+        if (
+            pure is None
+            or not 0 < len(source_path) <= 256
+            or pure.is_absolute()
+            or source_path != pure.as_posix()
+            or any(part in (".", "..") for part in pure.parts)
+            or any(ch in source_path for ch in "\\:\x00")
+        ):
+            raise ValueError("source_path must be a relative path in the source repository")
+        if (project, source_path) in sources:
+            raise ValueError("duplicate source file")
+        sources.add((project, source_path))
+        if item["transform"] not in TRANSFORMS or type(item["transform"]) is not str:
+            raise ValueError("transform must be verbatim or redacted")
+        if type(item["sha256"]) is not str or not SHA256.fullmatch(item["sha256"]):
+            raise ValueError("sample requires a SHA-256")
+        if type(item["path"]) is not str:
+            raise ValueError("sample path must be a string")
+        result.append((item["path"], str(projects[project]["split"]), item["sha256"], project))
+    if {project for _, _, _, project in result} != set(projects):
+        raise ValueError("every declared project needs at least one sample")
+    return result, projects
 
 
 def _sample_bytes(root: Path, relative_name: str, project: str | None = None) -> bytes:
@@ -75,44 +178,52 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
     version = manifest.get("version") if isinstance(manifest, dict) else None
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version not in (1, 2, 3):
         raise ValueError("unsupported manifest version")
-    samples = manifest.get("samples")
+    projects: dict[str, dict[str, object]] = {}
+    if version == 3:
+        samples, projects = _version_3_samples(manifest)
+    else:
+        samples = manifest.get("samples")
     if not isinstance(samples, list) or not 2 <= len(samples) <= MAX_SAMPLES:
         raise ValueError("manifest needs a bounded list of samples")
 
     fields = SAMPLE_FIELDS if version == 1 else SAMPLE_FIELDS | {"project"}
     grouped: dict[str, list[tuple[str, bytes]]] = {split: [] for split in SPLITS}
-    project_splits: dict[str, str] = {}
+    project_splits: dict[str, str] = {name: str(p["split"]) for name, p in projects.items()}
     paths: set[str] = set()
     digests: set[str] = set()
     total_bytes = 0
     for item in samples:
-        if not isinstance(item, dict) or set(item) != fields:
-            raise ValueError("invalid sample manifest fields")
-        relative_name, split, expected = item["path"], item["split"], item["sha256"]
-        license_id, source = item["license"], item["source"]
-        if type(split) is not str or split not in SPLITS:
-            raise ValueError("unsupported split")
-        project = None
-        if version == 2:
-            project = item["project"]
-            if type(project) is not str or not PROJECT_ID.fullmatch(project):
-                raise ValueError("project must be a lowercase identifier")
-            # A project held out for validation must never contribute training text.
-            if project_splits.setdefault(project, split) != split:
-                raise ValueError("project spans train and validation splits")
-        if (
-            type(expected) is not str
-            or not re.fullmatch(r"[0-9a-f]{64}", expected)
-            or type(license_id) is not str
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{1,63}", license_id)
-            or type(source) is not str
-            or not source.strip()
-            or len(source) > 256
-            or item["rights_reviewed"] is not True
-        ):
-            raise ValueError("sample requires a reviewed source, license and SHA-256")
+        if version == 3:
+            # Already validated, with provenance and rights checked per project.
+            relative_name, split, expected, project = item
+        else:
+            if not isinstance(item, dict) or set(item) != fields:
+                raise ValueError("invalid sample manifest fields")
+            relative_name, split, expected = item["path"], item["split"], item["sha256"]
+            license_id, source = item["license"], item["source"]
+            if type(split) is not str or split not in SPLITS:
+                raise ValueError("unsupported split")
+            project = None
+            if version == 2:
+                project = item["project"]
+                if type(project) is not str or not PROJECT_ID.fullmatch(project):
+                    raise ValueError("project must be a lowercase identifier")
+                # A project held out for validation must never contribute training text.
+                if project_splits.setdefault(project, split) != split:
+                    raise ValueError("project spans train and validation splits")
+            if (
+                type(expected) is not str
+                or not SHA256.fullmatch(expected)
+                or type(license_id) is not str
+                or not LICENSE_ID.fullmatch(license_id)
+                or type(source) is not str
+                or not source.strip()
+                or len(source) > 256
+                or item["rights_reviewed"] is not True
+            ):
+                raise ValueError("sample requires a reviewed source, license and SHA-256")
         if relative_name in paths or expected in digests:
             raise ValueError("duplicate file or content across corpus splits")
         data = _sample_bytes(root, relative_name, project)
@@ -151,12 +262,20 @@ def prepare(manifest_path: Path, output_dir: Path) -> dict[str, object]:
         "tokens": token_counts,
         "source_bytes": total_bytes,
     }
-    if version == 2:
+    if version >= 2:
         # Version 1 metadata stays byte-identical so existing run fingerprints still match.
-        metadata["manifest_version"] = 2
+        metadata["manifest_version"] = version
         metadata["projects"] = {
             split: sorted(p for p, s in project_splits.items() if s == split) for split in SPLITS
         }
+    if version == 3:
+        metadata["sources"] = {
+            name: {key: project[key] for key in ("repository", "commit", "rights_basis", "license")}
+            for name, project in sorted(projects.items())
+        }
+        metadata["local_only"] = any(
+            project["rights_basis"] == OWNER_AUTHORIZED for project in projects.values()
+        )
     (output_dir / "metadata.json").write_bytes(
         (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )

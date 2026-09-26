@@ -78,6 +78,81 @@ The version-2 tests build small, original synthetic projects in temporary
 directories. That synthetic data checks the pipeline only; it cannot
 establish coding quality.
 
+## Source-provenance manifests (version 3) and local owned corpora
+
+Version 3 records provenance and rights once per project and the original
+path once per file, so a manifest can describe code whose owner allowed local
+use without granting any public license:
+
+```json
+{
+  "version": 3,
+  "projects": {
+    "example-app": {
+      "split": "train",
+      "repository": "https://github.com/owner/example-app",
+      "commit": "<full 40-character commit hash>",
+      "rights_basis": "owner-authorized-local-use",
+      "license": null,
+      "authorized_by": "Who authorized which use, and when",
+      "rights_reviewed": true
+    }
+  },
+  "samples": [
+    {
+      "path": "samples/example-app/src__app.py.txt",
+      "project": "example-app",
+      "source_path": "src/app.py",
+      "sha256": "<SHA-256 of the LF-normalized copy>",
+      "transform": "verbatim"
+    }
+  ]
+}
+```
+
+`rights_basis` is either `public-license`, which requires an SPDX-style
+`license` and `authorized_by: null`, or `owner-authorized-local-use`, which
+requires `license: null` and a non-empty `authorized_by` note. An owner's
+permission is therefore never recorded as a license. Samples take their split from their
+project. A repository may belong to only one project, so it cannot be split
+across train and validation under two names. Each source path must be relative
+and unique, and each copy is marked `verbatim` or `redacted`. The version-1/2
+path, hash, symlink, duplicate-content, and size checks still apply. Metadata
+from a version-3 manifest lists each project's repository, commit, and rights,
+and sets `local_only: true` when any project is owner-authorized only.
+
+`model_lab.build_corpus` creates such a corpus from local clones and a spec
+that lists every file explicitly. It reads each file from Git's object store
+at the recorded commit, so uncommitted edits cannot slip in, and rejects Git
+LFS pointers, non-UTF-8 or binary files, and oversized files. A reviewed redacted copy
+may replace a file; it is recorded as `redacted` and must differ from the
+original. It never overwrites output. Keep the spec, copies, manifest, and
+prepared tokens under the ignored `model_lab/data/local/` and
+`model_lab/runs/` directories. Owner-authorized code must not be committed or
+published.
+
+```powershell
+& .\.venv\Scripts\python.exe -m model_lab.build_corpus --spec model_lab/data/local/owned-v1-spec.json --output model_lab/data/local/owned-v1 --git "C:\path\to\git.exe"
+& .\.venv\Scripts\python.exe -m model_lab.prepare --manifest model_lab/data/local/owned-v1/manifest.json --output model_lab/runs/owned-v1-data
+```
+
+The spec has the same project fields plus `clone` (local clone path), `files`
+(explicit source paths), and `redacted` (source path → reviewed replacement
+file). Builder tests need Git; set `PROFCODER_GIT` if `git` is not on `PATH`,
+otherwise they are skipped.
+
+First owned-corpus run (`owned-v1`, local only, 2026-09-27): 133 Python files
+(1,379,780 tokens) from one project for training, and 1 Python file (32,573
+tokens) from a different project for validation. Under the default 100-step
+budget (51,200 training-token positions, about 3.7% of one pass over the
+training split), the run took 6.7 s at about 11,200 training tokens/second,
+peaked at 367 MB RAM, and ended with train loss 2.77. Validation loss over all
+32,572 validation targets (128 windows of 256 tokens) was 2.74. A uniform guess
+over 259 byte IDs scores ln 259 ≈ 5.56. The two projects differ in domain, age,
+and style, and validation is a single file, so this loss mostly reflects
+byte-level Python and English statistics. It does not measure code
+correctness, generalization, or coding ability.
+
 ## CPU training milestone
 
 Install the CPU-only PyTorch build into a separate training environment; use
@@ -201,8 +276,8 @@ quality.
    checkpoint size) before increasing the budget. Do not use the GT 710 for
    this baseline.
 2. Expand to carefully reviewed, deduplicated original or permissively
-   licensed code in a version-2 project manifest, so evaluation is on held-out
-   projects. Licensing, attribution, and near-duplicate policy must be decided
+   licensed code in a project-split (version 2 or 3) manifest, so evaluation
+   is on held-out projects. Licensing, attribution, and near-duplicate policy must be decided
    by a person before any real corpus is added.
 3. Compare offline CPU generation latency/quality with a separate, existing
    open-weight model in Profcoder. Consider quantization only after the
