@@ -319,15 +319,22 @@ quality.
   state, and compute finite validation loss from the toy held-out file.
   Fluent code generation is **not** an expected result from this demo corpus.
 
+## Optional document extraction (proposal)
+
+The [two-page SQLite pilot](EXTRACTION_PILOT.md) will compare deterministic
+HTML extraction and optional ScrapeGraphAI extraction from the same saved,
+permitted pages. ScrapeGraphAI uses an existing LLM for extraction; it does
+not train the original Profcoder model. No page has been retrieved, scraper
+installed, or extraction accuracy, speed, or cost measured in this milestone.
+The owned ASTRA/company corpus and project split remain unchanged.
+
 ## Next milestones
 
-1. Review the measured `train-v1` baseline (throughput, wall time, RAM, loss,
-   checkpoint size) before increasing the budget. Do not use the GT 710 for
-   this baseline.
-2. Expand to carefully reviewed, deduplicated original or permissively
-   licensed code in a project-split (version 2 or 3) manifest, so evaluation
-   is on held-out projects. Licensing, attribution, and near-duplicate policy must be decided
-   by a person before any real corpus is added.
+1. Review the local owner-authorized corpus and add independently reviewed
+   held-out projects. One company source file is a limited validation set.
+2. If its access and rights checks still pass, run the bounded optional
+   extraction pilot and decide from measured accuracy, time, and LLM usage
+   whether to keep ScrapeGraphAI as a separate ingestion component.
 3. Compare offline CPU generation latency/quality with a separate, existing
    open-weight model in Profcoder. Consider quantization only after the
    measured baseline has been reviewed. Consider sparse experts and disk
