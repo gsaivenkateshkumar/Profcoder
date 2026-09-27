@@ -98,6 +98,32 @@ class CpuModelTrainingTests(unittest.TestCase):
             uninterrupted["sampling_rng_state"], restored["sampling_rng_state"]
         )
 
+    def test_step_budget_bounds(self):
+        from model_lab.train import MAX_SECONDS, MAX_STEPS, TrainConfig
+
+        self.assertEqual((MAX_STEPS, MAX_SECONDS), (1000, 1800))
+        self.assertEqual(TrainConfig().max_steps, 100)  # default stays small
+        self.assertEqual(TrainConfig(max_steps=1000, eval_every=100).max_steps, 1000)
+        for bad in (0, 1001, 100.0):
+            with self.subTest(max_steps=bad), self.assertRaisesRegex(ValueError, "max_steps"):
+                TrainConfig(max_steps=bad)
+        with self.assertRaisesRegex(ValueError, "eval_every"):
+            TrainConfig(eval_every=1001)
+        with self.assertRaisesRegex(ValueError, "30-minute"):
+            TrainConfig(max_seconds=1800.5)
+
+    def test_resume_refuses_checkpoint_beyond_requested_steps(self):
+        from model_lab.train import TrainConfig, train
+
+        settings = dict(model=self.model_config, batch_size=2, seq_length=8,
+                        cpu_threads=1, eval_every=1)
+        run_dir = self.root / "run"
+        train(self.prepared, run_dir, TrainConfig(max_steps=2, **settings))
+        with self.assertRaisesRegex(ValueError, "checkpoint does not match"):
+            train(self.prepared, run_dir, TrainConfig(max_steps=1, **settings), resume=True)
+        with self.assertRaises(FileExistsError):
+            train(self.prepared, run_dir, TrainConfig(max_steps=2, **settings))
+
     def test_modified_corpus_rejects_resume(self):
         from model_lab.train import TrainConfig, train
 

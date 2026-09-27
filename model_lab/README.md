@@ -222,8 +222,12 @@ If the smoke run passes, start the bounded full experiment:
 & F:\profcoder-model-venv\Scripts\python.exe -m model_lab.train --run model_lab/runs/train-v1
 ```
 
-`--resume --run model_lab/runs/train-v1` continues a saved run up to the
-100-step total. Reuse the original batch size and sequence length on resume;
+`--resume --run model_lab/runs/train-v1` continues a saved run up to its
+`--max-steps` total. The default is 100 steps and the permitted maximum is
+1,000 total steps. Each invocation is still capped at 30 minutes
+(`--max-seconds`, at most 1,800), so a longer run may need `--resume`. A resume
+refuses a checkpoint already beyond the requested `--max-steps`. Reuse the
+original batch size and sequence length on resume;
 the program checks those settings, model configuration, and a fingerprint of
 the prepared corpus. Choose a new `--run` directory to begin again. Runs are
 ignored by Git, and the training environment lives outside the repository.
@@ -304,7 +308,8 @@ quality.
   **30 MB** (about 16 bytes per parameter); activations, temporary arrays,
   Python, the optimizer, and Windows require more. The measured `train-v1`
   peak was 347 MB of process RAM.
-- First training run: cap it at 100 steps with batch 8 and sequence length 64
+- First training run (the default budget; `--max-steps` now permits up to
+  1,000): cap it at 100 steps with batch 8 and sequence length 64
   (at most 51,200 training-token positions) and a 30-minute soft cutoff. Record
   tokens per second, peak process memory, CPU usage, checkpoint size, train and
   held-out validation loss, and exact wall time before increasing the budget.
