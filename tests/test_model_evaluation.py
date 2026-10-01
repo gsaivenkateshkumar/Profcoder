@@ -130,6 +130,44 @@ class CpuEvaluationTests(unittest.TestCase):
         self.assertEqual(report["split_tokens"], validation_tokens)
         self.assertEqual(report["evaluated_target_tokens"], validation_tokens - 1)
 
+    def test_window_defaults_to_training_length_with_explicit_override(self):
+        from model_lab.evaluate import evaluate
+        from model_lab.generate import load_checkpoint
+
+        self.assertEqual(load_checkpoint(self.checkpoint)[1]["train_seq_length"], 8)
+        default = evaluate(self.checkpoint, self.prepared)
+        self.assertEqual((default["seq_length"], default["seq_length_source"]),
+                         (8, "checkpoint-training-seq-length"))
+        self.assertEqual(default["checkpoint_train_seq_length"], 8)
+        self.assertTrue(default["covered_entire_split"])
+        self.assertEqual(default, {**evaluate(self.checkpoint, self.prepared, seq_length=8),
+                                   "seq_length_source": "checkpoint-training-seq-length",
+                                   "elapsed_seconds": default["elapsed_seconds"]})
+        override = evaluate(self.checkpoint, self.prepared, seq_length=16)
+        self.assertEqual((override["seq_length"], override["seq_length_source"]), (16, "explicit"))
+        self.assertNotEqual(override["loss"], default["loss"])
+
+    def test_checkpoints_without_training_length_fall_back_to_model_context(self):
+        from model_lab.evaluate import evaluate
+        from model_lab.generate import load_checkpoint
+
+        original = self.torch.load(self.checkpoint, weights_only=True, map_location="cpu")
+        for name, settings in (("legacy", None), ("bad-type", {"seq_length": 8.0}),
+                               ("too-long", {"seq_length": 17}), ("not-dict", [8])):
+            with self.subTest(name):
+                payload = dict(original)
+                if settings is None:
+                    del payload["train_settings"]
+                else:
+                    payload["train_settings"] = settings
+                path = self.root / f"{name}.pt"
+                self.torch.save(payload, path)
+                self.assertIsNone(load_checkpoint(path)[1]["train_seq_length"])
+                report = evaluate(path, self.prepared)
+                self.assertEqual((report["seq_length"], report["seq_length_source"]),
+                                 (16, "model-context-length"))
+                self.assertIsNone(report["checkpoint_train_seq_length"])
+
     def test_reports_a_different_corpus(self):
         from model_lab.evaluate import evaluate
 

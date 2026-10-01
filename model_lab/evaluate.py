@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from torch.nn import functional as F
 
-from model_lab.generate import load_checkpoint
+from model_lab.generate import default_context_length, load_checkpoint
 from model_lab.model import ByteTransformer
 from model_lab.train import load_corpus
 
@@ -72,11 +72,16 @@ def evaluate(
     checkpoint_path: Path, data_dir: Path, *, seq_length: int | None = None,
     max_windows: int = 64,
 ) -> dict[str, object]:
-    """Load the checkpoint and validation split read-only and report token-weighted loss."""
+    """Load the checkpoint and validation split read-only and report token-weighted loss.
+
+    The window length defaults to the checkpoint's training ``seq_length`` (positions
+    beyond it were never trained); without one, the model's full context is used.
+    An explicit ``seq_length`` always wins.
+    """
     start = time.perf_counter()
     model, info = load_checkpoint(checkpoint_path)
     corpus, fingerprint = load_corpus(Path(data_dir), 1)
-    length = model.config.context_length if seq_length is None else seq_length
+    length, source = default_context_length(model, info, seq_length)
     report = evaluate_tokens(model, corpus["validation"], length, max_windows)
     return {
         "checkpoint_sha256": info["sha256"],
@@ -85,6 +90,8 @@ def evaluate(
         "corpus_matches_checkpoint": info["data_fingerprint"] == fingerprint,
         "split": "validation",
         **report,
+        "seq_length_source": source,
+        "checkpoint_train_seq_length": info["train_seq_length"],
         "elapsed_seconds": round(time.perf_counter() - start, 3),
     }
 
@@ -93,7 +100,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=Path("model_lab/runs/train-v1/checkpoint.pt"))
     parser.add_argument("--data", type=Path, default=Path("model_lab/runs/demo-v1"))
-    parser.add_argument("--seq-length", type=int)
+    parser.add_argument(
+        "--seq-length", type=int,
+        help="window length; default: the checkpoint's training seq_length, else model context",
+    )
     parser.add_argument("--max-windows", type=int, default=64)
     parser.add_argument("--cpu-threads", type=int, default=6)
     parser.add_argument("--report", type=Path, help="write JSON here; never overwrites")

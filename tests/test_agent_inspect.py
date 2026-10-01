@@ -106,7 +106,7 @@ def test_inspect_passes_list_search_and_read_results_to_model(inspector):
         tool["function"]["name"]
         for tool in model.requests[0]["tools"]
     }
-    assert exposed_tools == {"list_files", "search_text", "read_file"}
+    assert exposed_tools == {"list_files", "search_text", "find_definitions", "read_file"}
 
 
 def test_inspect_does_not_read_excluded_or_outside_files(inspector, tmp_path, monkeypatch):
@@ -552,6 +552,140 @@ def test_inspect_bounds_request_file_context_and_response(inspector, monkeypatch
     context_response = client.post("/agent/inspect", json={"question": "Read the file."})
     assert context_response.status_code == 502
     assert len(model.requests) == 1
+
+
+def tool_results(model):
+    return {
+        message["tool_call_id"]: message["content"]
+        for request in model.requests
+        for message in request["messages"]
+        if message["role"] == "tool"
+    }
+
+
+def test_find_definitions_returns_exact_definition_lines(inspector):
+    client, root = inspector
+    source = root / "src" / "logic.py"
+    source.parent.mkdir()
+    source.write_text(
+        "answer = 'answer'  # not a definition\n"
+        "def answer():\n    return 42\n\n"
+        "class Box:\n    def answer(self):\n        return answer()\n",
+        encoding="utf-8",
+    )
+    model = FakeToolModel([
+        model_message(tool_calls=[
+            tool_call("find_definitions", {"name": "answer"}, "defs-1"),
+            tool_call("find_definitions", {"name": "Box.answer", "path": "src"}, "defs-2"),
+        ]),
+        model_message(content="answer is defined at src/logic.py line 2."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Where is answer defined?"})
+
+    assert response.status_code == 200
+    results = {key: json.loads(value) for key, value in tool_results(model).items()}
+    assert all(value["untrusted_repository_data"] is True for value in results.values())
+    plain = [(r["path"], r["line"], r["kind"], r["qualified_name"]) for r in results["defs-1"]["result"]["results"]]
+    assert plain == [("src/logic.py", 2, "function", "answer"), ("src/logic.py", 6, "method", "Box.answer")]
+    qualified = results["defs-2"]["result"]["results"]
+    assert [(r["line"], r["qualified_name"]) for r in qualified] == [(6, "Box.answer")]
+    tool = next(t for t in model.requests[0]["tools"] if t["function"]["name"] == "find_definitions")
+    assert tool["function"]["parameters"]["required"] == ["name"]
+    assert tool["function"]["parameters"]["properties"]["name"]["maxLength"] == MAX_QUERY_CHARS
+
+
+def test_find_definitions_invalid_names_return_constraints_without_scanning(inspector, monkeypatch):
+    client, root = inspector
+    (root / "mod.py").write_text("def target():\n    pass\n", encoding="utf-8")
+    scans = []
+    real = __import__("app.agent_inspect", fromlist=["find_definitions"]).find_definitions
+
+    def spy(*args, **kwargs):
+        scans.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.agent_inspect.find_definitions", spy)
+    model = FakeToolModel([
+        model_message(tool_calls=[
+            tool_call("find_definitions", {"name": "two words"}, "bad-space"),
+            tool_call("find_definitions", {"name": "class"}, "bad-keyword"),
+            tool_call("find_definitions", {"name": 7}, "bad-type"),
+            tool_call("find_definitions", {"query": "target"}, "bad-key"),
+        ]),
+        model_message(tool_calls=[tool_call("find_definitions", {"name": "target"}, "good")]),
+        model_message(content="target is defined in mod.py."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Find target."})
+
+    assert response.status_code == 200
+    results = tool_results(model)
+    for call_id, reason in (("bad-space", "name_invalid"), ("bad-keyword", "name_invalid"),
+                            ("bad-type", "name_type"), ("bad-key", "arguments_schema")):
+        error = json.loads(results[call_id])["tool_error"]
+        assert (error["code"], error["reason"], error["tool"]) == ("invalid_arguments", reason, "find_definitions")
+        assert "dotted name" in error["accepted"]
+    assert '"line":1' in results["good"]
+    assert scans == ["target"]
+
+
+def test_find_definitions_rejects_excluded_and_outside_paths(inspector, tmp_path):
+    client, root = inspector
+    (root / ".venv").mkdir()
+    (root / ".venv" / "lib.py").write_text("def target():\n    pass\n", encoding="utf-8")
+    (root / "credentials_helper.py").write_text("def target():\n    pass\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.py").write_text("def OUTSIDE_SENTINEL():\n    pass\n", encoding="utf-8")
+    model = FakeToolModel([
+        model_message(tool_calls=[
+            tool_call("find_definitions", {"name": "target", "path": ".venv"}, "excluded"),
+            tool_call("find_definitions", {"name": "OUTSIDE_SENTINEL", "path": "../outside"}, "outside"),
+            tool_call("find_definitions", {"name": "OUTSIDE_SENTINEL", "path": str(outside)}, "absolute"),
+            tool_call("find_definitions", {"name": "target"}, "root"),
+        ]),
+        model_message(content="No accessible definition was found."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Find target everywhere."})
+
+    assert response.status_code == 200
+    results = tool_results(model)
+    for call_id in ("excluded", "outside", "absolute"):
+        error = json.loads(results[call_id])["tool_error"]
+        assert (error["code"], error["reason"]) == ("invalid_arguments", "path_scope")
+    assert json.loads(results["root"])["result"]["results"] == []  # excluded files are not scanned
+    assert "OUTSIDE_SENTINEL" not in response.text
+    assert all("private.py" not in value for value in results.values())
+
+
+def test_find_definitions_results_are_bounded(inspector):
+    from app.agent_inspect import MAX_SINGLE_TOOL_RESULT_BYTES
+    from app.project_files import MAX_SEARCH_RESULTS
+
+    client, root = inspector
+    (root / "many.py").write_text(
+        "".join(f"class Item{i}:\n    def target(self):\n        pass\n" for i in range(MAX_SEARCH_RESULTS + 20)),
+        encoding="utf-8",
+    )
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("find_definitions", {"name": "target"}, "many")]),
+        model_message(content="There are many target methods."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "List every target."})
+
+    assert response.status_code == 200
+    content = tool_results(model)["many"]
+    assert len(content.encode("utf-8")) <= MAX_SINGLE_TOOL_RESULT_BYTES
+    result = json.loads(content)["result"]
+    assert result["truncated"] is True
+    assert 0 < len(result["results"]) <= MAX_SEARCH_RESULTS
 
 
 def test_git_review_tool_is_available_only_when_configured(inspector):

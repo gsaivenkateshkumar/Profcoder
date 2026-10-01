@@ -135,6 +135,9 @@ class CpuGenerationTests(unittest.TestCase):
             dict(prompt="a", max_new_tokens=1, temperature=-1.0),
             dict(prompt="a", max_new_tokens=1, temperature=float("nan")),
             dict(prompt="a", max_new_tokens=1, temperature=1.0, top_k=0),
+            dict(prompt="a", max_new_tokens=1, context_length=0),
+            dict(prompt="a", max_new_tokens=1, context_length=17),
+            dict(prompt="a", max_new_tokens=1, context_length=8.0),
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 generate(model, **kwargs)
@@ -149,6 +152,41 @@ class CpuGenerationTests(unittest.TestCase):
         self.assertEqual(result.text, "yyy")
         self.assertEqual([c.size(1) for c in calls], [16, 16, 16])
         self.assertEqual(calls[-1][0].tolist(), encode(prompt + "yy")[-16:])
+
+    def test_explicit_context_length_limits_each_window(self):
+        from model_lab.generate import generate
+
+        model, calls = self.scripted_model([[ord("y")]])
+        generate(model, "abcdefghijklmnopqrstuvwxyz", 2, context_length=8)
+        self.assertEqual([c.size(1) for c in calls], [8, 8])
+        self.assertEqual(calls[-1][0].tolist(), encode("abcdefghijklmnopqrstuvwxyzy")[-8:])
+
+    def test_cli_defaults_to_training_length_and_honors_override(self):
+        import subprocess
+        import sys
+
+        command = [sys.executable, "-W", "ignore", "-m", "model_lab.generate",
+                   "--checkpoint", str(self.checkpoint), "--prompt", "def ",
+                   "--max-new-tokens", "4", "--cpu-threads", "1"]
+        root = Path(__file__).resolve().parents[1]
+        for extra, expected in (([], (8, "checkpoint-training-seq-length")),
+                                (["--context-length", "16"], (16, "explicit"))):
+            with self.subTest(extra=extra):
+                done = subprocess.run(command + extra, cwd=root, capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                output = json.loads(done.stdout)
+                self.assertEqual((output["context_length"], output["context_length_source"]), expected)
+        bad = subprocess.run(command + ["--context-length", "17"], cwd=root, capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+
+    def test_default_context_length_selection(self):
+        from model_lab.generate import default_context_length, load_checkpoint
+
+        model, info = load_checkpoint(self.checkpoint)
+        self.assertEqual(default_context_length(model, info), (8, "checkpoint-training-seq-length"))
+        self.assertEqual(default_context_length(model, info, 12), (12, "explicit"))
+        self.assertEqual(default_context_length(model, {**info, "train_seq_length": None}),
+                         (16, "model-context-length"))
 
     def test_stops_at_eos_without_emitting_it(self):
         from model_lab.generate import generate

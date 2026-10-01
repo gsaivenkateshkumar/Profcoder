@@ -22,6 +22,7 @@ from app.project_files import (
     resolve_scope,
     search_project_files,
 )
+from app.symbol_search import find_definitions, valid_definition_name
 from app.test_runner import GitChangeReader
 
 
@@ -122,6 +123,15 @@ def _tool_definitions(git_reader: GitChangeReader | None) -> list[dict[str, obje
                 "path": {"type": "string", "maxLength": MAX_PATH_CHARS},
             },
             ["query"],
+        ),
+        _tool_definition(
+            "find_definitions",
+            "Find where Python functions, methods, or classes are defined by exact name (for example, parse_args) or dotted qualified name (for example, Config.load). Parses .py files offline without running them. Returns paths, definition line numbers, kinds, and qualified names. Supply an existing relative directory path or omit path to search the project root.",
+            {
+                "name": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
+                "path": {"type": "string", "maxLength": MAX_PATH_CHARS},
+            },
+            ["name"],
         ),
         _tool_definition(
             "read_file",
@@ -263,6 +273,7 @@ def _validate_arguments(
     allowed = {
         "list_files": ({"path"}, set()),
         "search_text": ({"query", "path"}, {"query"}),
+        "find_definitions": ({"name", "path"}, {"name"}),
         "read_file": ({"path", "start_line", "max_lines"}, {"path"}),
         "git_review": (set(), set()),
     }
@@ -285,6 +296,12 @@ def _validate_arguments(
             raise InvalidToolArguments(name, "query_empty")
         if len(query) > MAX_QUERY_CHARS:
             raise InvalidToolArguments(name, "query_too_long")
+    if name == "find_definitions":
+        definition_name = arguments["name"]
+        if not isinstance(definition_name, str):
+            raise InvalidToolArguments(name, "name_type")
+        if not valid_definition_name(definition_name):
+            raise InvalidToolArguments(name, "name_invalid")
     if name == "read_file":
         start_line = arguments.get("start_line", 1)
         max_lines = arguments.get("max_lines", 80)
@@ -295,9 +312,9 @@ def _validate_arguments(
         arguments = {**arguments, "start_line": start_line, "max_lines": max_lines}
     if name == "list_files" and "path" not in arguments:
         arguments = {**arguments, "path": "."}
-    if name == "search_text" and "path" not in arguments:
+    if name in {"search_text", "find_definitions"} and "path" not in arguments:
         arguments = {**arguments, "path": "."}
-    if name in {"list_files", "search_text"}:
+    if name in {"list_files", "search_text", "find_definitions"}:
         try:
             _validate_project_scope(project_root, arguments["path"])
         except (OSError, RuntimeError, ProjectPathError, ValueError) as exc:
@@ -346,6 +363,7 @@ def _invalid_tool_content(tool_name: str, reason: str) -> str:
     accepted = {
         "list_files": "{} or {path: existing, non-excluded relative directory (1-1024 chars)}",
         "search_text": "{query: non-blank string (1-160 chars), path?: existing non-excluded relative directory (1-1024 chars)}",
+        "find_definitions": "{name: Python identifier or dotted name such as Class.method (1-160 chars), path?: existing non-excluded relative directory (1-1024 chars)}",
         "read_file": "{path: existing non-excluded relative UTF-8 text file up to 500 KiB, start_line?: positive integer, max_lines?: integer 1-100}",
         "git_review": "{}",
     }.get(tool_name, "the tool's declared JSON schema")
@@ -392,6 +410,8 @@ def _dispatch_tool(
             return list_project_files(project_root, arguments["path"])
         if name == "search_text":
             return search_project_files(project_root, arguments["query"], arguments["path"])
+        if name == "find_definitions":
+            return find_definitions(project_root, arguments["name"], arguments["path"])
         if name == "read_file":
             return _read_range(editor, arguments)
         if name == "git_review" and git_reader is not None:

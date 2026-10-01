@@ -64,20 +64,45 @@ def load_checkpoint(checkpoint_path: Path) -> tuple[ByteTransformer, dict[str, o
     except RuntimeError as error:
         raise ValueError("checkpoint weights do not match its model configuration") from error
     step, fingerprint = checkpoint.get("step"), checkpoint.get("data_fingerprint")
+    settings = checkpoint.get("train_settings")
+    seq_length = settings.get("seq_length") if isinstance(settings, dict) else None
     info = {
         "sha256": hashlib.sha256(raw).hexdigest(),
         "step": step if type(step) is int else None,
         "data_fingerprint": fingerprint if isinstance(fingerprint, str) else None,
+        # The window length the model actually trained on; positions beyond it were
+        # never trained. None for checkpoints that do not record a usable value.
+        "train_seq_length": (
+            seq_length if type(seq_length) is int
+            and 1 <= seq_length <= model.config.context_length else None
+        ),
     }
     return model.eval(), info
+
+
+def default_context_length(
+    model: ByteTransformer, info: dict[str, object], explicit: int | None = None,
+) -> tuple[int, str]:
+    """Choose a context length: explicit override, else training length, else model context."""
+    if explicit is not None:
+        return explicit, "explicit"
+    if info.get("train_seq_length") is not None:
+        return int(info["train_seq_length"]), "checkpoint-training-seq-length"
+    return model.config.context_length, "model-context-length"
 
 
 @torch.no_grad()
 def generate(
     model: ByteTransformer, prompt: str, max_new_tokens: int, *,
     temperature: float = 0.0, top_k: int | None = None, seed: int = 0,
+    context_length: int | None = None,
 ) -> GenerationResult:
-    """Greedy by default; stops at EOS or after max_new_tokens. Never emits BOS/PAD."""
+    """Greedy by default; stops at EOS or after max_new_tokens. Never emits BOS/PAD.
+
+    ``context_length`` limits how many recent tokens are fed to the model; it
+    defaults to the model's full context for backward compatibility. The CLI
+    passes the checkpoint's training window length instead.
+    """
     prompt_ids = encode(prompt)
     if len(prompt_ids) > MAX_PROMPT_BYTES:
         raise ValueError(f"prompt must be at most {MAX_PROMPT_BYTES} UTF-8 bytes")
@@ -89,7 +114,10 @@ def generate(
     if top_k is not None and (type(top_k) is not int or not 1 <= top_k <= vocab_size):
         raise ValueError(f"top_k must be 1..{vocab_size}")
 
-    context_length = model.config.context_length
+    if context_length is None:
+        context_length = model.config.context_length
+    if type(context_length) is not int or not 1 <= context_length <= model.config.context_length:
+        raise ValueError(f"context_length must be 1..{model.config.context_length}")
     # Training documents are raw bytes followed by EOS, so an empty prompt starts after EOS.
     tokens = prompt_ids or [EOS_ID]
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -133,20 +161,28 @@ def main() -> None:
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu-threads", type=int, default=6)
+    parser.add_argument(
+        "--context-length", type=int,
+        help="tokens of context per step; default: the checkpoint's training window length",
+    )
     args = parser.parse_args()
     if not 1 <= args.cpu_threads <= 12:
         parser.error("--cpu-threads must be 1..12")
     torch.set_num_threads(args.cpu_threads)
     start = time.perf_counter()
-    model = load_model(args.checkpoint)
+    model, info = load_checkpoint(args.checkpoint)
+    context_length, source = default_context_length(model, info, args.context_length)
     result = generate(
         model, args.prompt, args.max_new_tokens,
         temperature=args.temperature, top_k=args.top_k, seed=args.seed,
+        context_length=context_length,
     )
     print(json.dumps({
         "text": result.text,
         "generated_tokens": len(result.token_ids),
         "stopped_at_eos": result.stopped_at_eos,
+        "context_length": context_length,
+        "context_length_source": source,
         "elapsed_seconds": round(time.perf_counter() - start, 3),
     }, indent=2))
 

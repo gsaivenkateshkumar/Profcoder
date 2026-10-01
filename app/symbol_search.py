@@ -1,8 +1,9 @@
 """Offline, read-only lookup of Python function/class definitions by name.
 
-Pilot only: not wired to the agent or any HTTP route. It walks files with the
-same exclusions and bounds as search_text, parses Python source with ``ast``
-(which never executes it), and reports exact definition lines.
+Exposed as the read-only ``find_definitions`` tool of ``/agent/inspect``. The
+lookup itself is offline: it walks files with the same exclusions and bounds
+as search_text, parses Python source with ``ast`` (which never executes it),
+and reports exact definition lines.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ DEFINITION_KINDS = {
 }
 
 
-def _valid_name(name: str) -> bool:
+def valid_definition_name(name: str) -> bool:
     parts = name.split(".")
     return (
         0 < len(name) <= MAX_QUERY_CHARS
@@ -66,7 +67,7 @@ def find_definitions(root: Path, name: str, relative_path: str = ".") -> dict[st
     A plain name matches any definition with that exact, case-sensitive name;
     ``Class.method`` matches only that qualified definition.
     """
-    if not isinstance(name, str) or not _valid_name(name):
+    if not isinstance(name, str) or not valid_definition_name(name):
         raise ProjectPathError("Definition name must be a Python identifier or dotted name")
     name = unicodedata.normalize("NFKC", name)  # match the parser's identifier form
     last_part = name.rsplit(".", 1)[-1]

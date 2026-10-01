@@ -263,8 +263,14 @@ the API.
 & F:\profcoder-model-venv\Scripts\python.exe -m unittest discover -s tests -p test_model_generation.py -v
 ```
 
-Prompts are limited to 4,096 UTF-8 bytes and output to 1–512 new tokens; only
-the most recent context-length tokens are fed to the model. Decoding is greedy
+Prompts are limited to 4,096 UTF-8 bytes and output to 1–512 new tokens. Only
+the most recent context tokens are fed to the model. The CLI defaults to the
+checkpoint's training `seq_length`, because positions beyond it were never
+trained (for example, 64 of the model's 256 positions). It falls back to the
+model's full context for checkpoints that do not record one.
+`--context-length` overrides it, and the output reports `context_length` and
+`context_length_source`. The `generate()` library function keeps its previous
+default (the full model context) unless `context_length=` is passed. Decoding is greedy
 unless `--temperature` (up to 2.0) is set, optionally with `--top-k` and
 `--seed`. Generation stops at EOS, which is not included in the output; BOS and
 padding are never produced. Because training documents are raw bytes followed by
@@ -286,15 +292,23 @@ call the Groq application.
 Windows are consecutive and non-overlapping from token 0. Window *i* feeds
 tokens `[start, end)` and scores next-token targets `[start+1, end+1)`; the
 last window may be shorter, so each target is scored at most once. The window
-length defaults to the checkpoint's context length (`--seq-length` overrides
-it), and at most `--max-windows` (default 64, maximum 1,024) are scored. The JSON
+length defaults to the checkpoint's training `seq_length`, and to the model's
+full context for checkpoints that do not record one. `--seq-length` overrides it
+for experiments, and the report states `seq_length`, `seq_length_source`, and
+`checkpoint_train_seq_length`. Evaluating a 64-token-trained checkpoint with
+256-token windows mixes in untrained positions and inflates the loss. For the
+owned-v3 1000-step checkpoint, the full-split loss is 2.433 at 64 tokens versus
+3.253 at 256. At most `--max-windows` (default 64, maximum 1,024) windows are
+scored, so check `covered_entire_split`; a full split usually needs a larger
+`--max-windows`. The JSON
 report lists every window's token ranges and loss, the token-weighted mean loss,
 how many target tokens were scored, and whether the whole split was covered.
 It also gives the checkpoint's SHA-256 and step, the corpus fingerprint, and
 whether that fingerprint matches the corpus the checkpoint was trained on.
 `--report PATH` also writes the JSON but refuses to overwrite an existing file.
 Windows may cross document (EOS) boundaries. On the demo corpus, `train-v1`
-scores all 98 validation targets in one 256-token window with a loss of 3.488.
+scored all 98 validation targets in one 256-token window with a loss of 3.488.
+That figure was measured under the earlier full-context default.
 This number only compares runs on this toy data; it says nothing about coding
 quality.
 

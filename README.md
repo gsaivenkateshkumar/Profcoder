@@ -66,8 +66,9 @@ excerpt limits. If `REPO_ROOT` is unset or invalid, these endpoints return `503`
 
 ## Local project inspection
 `POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and
-uses Groq function calling with read-only project listing, text search, safe
-text-file reading, and (when configured) bounded Git review. Set
+uses Groq function calling with read-only project listing, text search, Python
+definition lookup, safe text-file reading, and (when configured) bounded Git
+review. Set
 `PROFCODER_GIT_EXECUTABLE` to an absolute Git executable path to enable Git
 review; leave it unset to omit that tool. The endpoint has no editing, rollback,
 test-running, shell, or web-research tools.
@@ -77,6 +78,18 @@ conversation to answer the question. Use only project roots whose readable code
 you are willing to send to Groq. Requests are capped at 12 KiB, five model turns,
 six tool calls, 64 KiB serialized context, and a 12 KiB JSON response. File reads
 are limited to 100 lines and 6 KiB of text. The API remains bound to `127.0.0.1`.
+
+The `find_definitions` tool (`app/symbol_search.py`) finds where a Python
+function, method, or class is defined, by exact name or dotted name such as
+`Config.load`. It returns path, line, kind, and qualified name. The lookup itself
+runs offline: it parses `.py` files with Python's `ast` module without executing
+them, and it uses the same path exclusions, symlink/junction refusal, and file,
+scan, and result limits as text search. It is still one tool inside
+`/agent/inspect`, so using it **requires a configured Groq key**, and its results
+are sent to Groq like other tool results. It does not connect the from-scratch
+`model_lab` model to the agent. On a fixed 16-task, 31-location benchmark, it
+found 31/31 definitions with no extra hits. Text search for the bare name found
+22/31 and returned 354 non-definition lines.
 
 ```powershell
 $body = @{ question = "Where is the chat route defined?" } | ConvertTo-Json
