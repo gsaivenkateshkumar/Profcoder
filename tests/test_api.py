@@ -155,3 +155,92 @@ def test_rate_limit_error():
         response = client.post("/chat", json={"messages": [{"role": "user", "content": "hi"}]})
         assert response.status_code == 429
         assert "rate limit" in response.json()["detail"].lower()
+
+
+class ExplodingProvider:
+    """Any provider call during an offline route is a bug; fail loudly instead."""
+
+    async def chat(self, messages, *, stream=False):
+        raise AssertionError("provider must not be called by an offline project route")
+
+    async def chat_with_tools(self, messages, tools, *, max_completion_tokens, tool_choice="auto"):
+        raise AssertionError("provider must not be called by an offline project route")
+
+
+def test_project_definitions_returns_qualified_definition(tmp_path, monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text(
+        "class Box:\n    def volume(self, w, h, d):\n        return w * h * d\n",
+        encoding="utf-8",
+    )
+    with TestClient(app) as client:
+        app.state.provider = ExplodingProvider()
+        response = client.get("/project/definitions", params={"name": "Box.volume"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["truncated"] is False
+    assert body["unparsed_files"] == 0
+    assert len(body["results"]) == 1
+    result = body["results"][0]
+    assert result["path"] == "pkg/mod.py"
+    assert result["kind"] == "method"
+    assert result["qualified_name"] == "Box.volume"
+
+
+def test_project_definitions_works_without_groq_key_and_never_calls_provider(tmp_path, monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "mod.py").write_text("def greet():\n    return 'hi'\n", encoding="utf-8")
+    with TestClient(app) as client:
+        app.state.provider = ExplodingProvider()  # would raise if the route ever called it
+        response = client.get("/project/definitions", params={"name": "greet"})
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 1
+
+
+def test_project_definitions_requires_configured_project_root(monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    with TestClient(app) as client:
+        response = client.get("/project/definitions", params={"name": "anything"})
+    assert response.status_code == 503
+
+
+def test_project_definitions_rejects_invalid_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    with TestClient(app) as client:
+        response = client.get("/project/definitions", params={"name": "1not_an_identifier"})
+    assert response.status_code == 400
+
+
+def test_project_definitions_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    with TestClient(app) as client:
+        response = client.get("/project/definitions", params={"name": "greet", "path": "../outside"})
+    assert response.status_code == 400
+
+
+def test_project_definitions_skips_excluded_directories(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    excluded = tmp_path / "node_modules" / "pkg"
+    excluded.mkdir(parents=True)
+    (excluded / "evil.py").write_text("def hidden():\n    return 1\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/definitions", params={"name": "hidden"})
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+
+
+def test_project_definitions_bounded_results_are_truncated(tmp_path, monkeypatch):
+    from app.project_files import MAX_SEARCH_RESULTS
+
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    for index in range(MAX_SEARCH_RESULTS + 5):
+        (tmp_path / f"mod_{index}.py").write_text("def shared():\n    return 1\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/definitions", params={"name": "shared"})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["results"]) == MAX_SEARCH_RESULTS
+    assert body["truncated"] is True

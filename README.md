@@ -56,13 +56,19 @@ relative to that root:
 ```text
 GET http://127.0.0.1:8001/project/files?path=src
 GET http://127.0.0.1:8001/project/search?q=TODO&path=src
+GET http://127.0.0.1:8001/project/definitions?name=Class.method&path=src
 ```
 
-Search returns relative paths, one-based line numbers, and bounded excerpts. The
-read-only endpoints exclude credentials, environment files, VCS data, virtual
-environments, caches, binary and oversized files. They do not send indexed
-content automatically. Requests are bounded by path, scan, file, result, and
-excerpt limits. If `REPO_ROOT` is unset or invalid, these endpoints return `503`.
+Search returns relative paths, one-based line numbers, and bounded excerpts.
+`/project/definitions` looks up a Python `def`/`class` by exact name (or a
+dotted qualified name such as `Class.method`) using `ast` parsing only; it
+never executes any file, works with no `GROQ_API_KEY` set, and makes no
+provider call — this is offline code navigation, not generation by the
+from-scratch Profcoder model in `model_lab/`. The read-only endpoints exclude
+credentials, environment files, VCS data, virtual environments, caches, binary
+and oversized files. They do not send indexed content automatically. Requests
+are bounded by path, scan, file, result, and excerpt limits. If `REPO_ROOT` is
+unset or invalid, these endpoints return `503`.
 
 ## Local project inspection
 `POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and

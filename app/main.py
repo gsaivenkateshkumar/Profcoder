@@ -38,6 +38,7 @@ from app.project_files import (
     list_project_files,
     search_project_files,
 )
+from app.symbol_search import find_definitions
 from app.test_runner import GitChangeReader
 
 
@@ -125,6 +126,17 @@ def project_search(
 ):
     try:
         return search_project_files(require_project_root(), q, path)
+    except ProjectPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/project/definitions")
+def project_definitions(
+    name: str = Query(min_length=1, max_length=MAX_QUERY_CHARS),
+    path: str = Query(default=".", max_length=MAX_PATH_CHARS),
+):
+    try:
+        return find_definitions(require_project_root(), name, path)
     except ProjectPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
