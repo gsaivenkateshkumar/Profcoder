@@ -72,11 +72,17 @@ unset or invalid, these endpoints return `503`.
 
 Open `http://127.0.0.1:8001/project/browser` for a small local page over the
 same three endpoints: file listing, search, and definitions, with truncation
-and error states shown. It is served from `app/static/`, uses no CDN, cloud
-API, Groq, or model call, and works with no `GROQ_API_KEY` set. All
-repository-derived text (paths, excerpts, names) is written with
-`textContent` only, never parsed as HTML, so it is safe to point at untrusted
-content. There is no editing or command execution anywhere on the page.
+and error states shown. Clicking a listed file, search hit, or definition
+calls `GET /project/preview?path=...&start=...&lines=...` and shows a bounded,
+numbered range of lines (`MAX_PREVIEW_LINES` per request, each line capped at
+`MAX_PREVIEW_LINE_CHARS`). Preview reuses the same safe single-file
+resolution as the internal file editor: traversal, exclusion, symlink/
+junction, hard-link, and size checks, and rejects binary or non-UTF-8 files.
+It is served from `app/static/`, uses no CDN, cloud API, Groq, or model call,
+and works with no `GROQ_API_KEY` set. All repository-derived text (paths,
+excerpts, names, previewed lines) is written with `textContent` only, never
+parsed as HTML, so it is safe to point at untrusted content. There is no
+editing or command execution anywhere on the page.
 
 ## Local project inspection
 `POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and

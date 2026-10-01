@@ -38,6 +38,7 @@ from app.project_files import (
     list_project_files,
     search_project_files,
 )
+from app.file_preview import MAX_PREVIEW_LINES, FileEditError, preview_project_file
 from app.symbol_search import find_definitions
 from app.test_runner import GitChangeReader
 
@@ -147,6 +148,18 @@ def project_definitions(
     try:
         return find_definitions(require_project_root(), name, path)
     except ProjectPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/project/preview")
+def project_preview(
+    path: str = Query(min_length=1, max_length=MAX_PATH_CHARS),
+    start: int = Query(default=1, ge=1),
+    lines: int = Query(default=120, ge=1, le=MAX_PREVIEW_LINES),
+):
+    try:
+        return preview_project_file(require_project_root(), path, start, lines)
+    except (ProjectPathError, FileEditError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

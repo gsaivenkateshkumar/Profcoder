@@ -281,6 +281,125 @@ def test_search_hostile_filename_and_excerpt_stay_plain_text(tmp_path, monkeypat
     assert "<script>" in body["results"][0]["excerpt"]
 
 
+def test_project_preview_returns_numbered_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "mod.py").write_text("def greet():\n    return 'hi'\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "mod.py"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["path"] == "mod.py"
+    assert body["start_line"] == 1
+    assert body["end_line"] == 2
+    assert body["total_lines"] == 2
+    assert body["truncated"] is False
+    assert body["lines"] == ["def greet():", "    return 'hi'"]
+
+
+def test_project_preview_start_line_selects_a_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "mod.py").write_text("".join(f"line {i}\n" for i in range(1, 11)), encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "mod.py", "start": 5, "lines": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["start_line"] == 5
+    assert body["end_line"] == 7
+    assert body["total_lines"] == 10
+    assert body["truncated"] is True
+    assert body["lines"] == ["line 5", "line 6", "line 7"]
+
+
+def test_project_preview_start_beyond_end_of_file_returns_no_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "mod.py").write_text("one\ntwo\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "mod.py", "start": 100})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["lines"] == []
+    assert body["total_lines"] == 2
+
+
+def test_project_preview_caps_line_count_and_reports_truncation(tmp_path, monkeypatch):
+    from app.file_preview import MAX_PREVIEW_LINES
+
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "big.py").write_text("".join(f"x = {i}\n" for i in range(MAX_PREVIEW_LINES + 100)), encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "big.py", "lines": MAX_PREVIEW_LINES})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["lines"]) == MAX_PREVIEW_LINES
+    assert body["truncated"] is True
+    # The route itself rejects a request for more than the cap outright.
+    with TestClient(app) as client:
+        over_cap = client.get("/project/preview", params={"path": "big.py", "lines": MAX_PREVIEW_LINES + 1})
+    assert over_cap.status_code == 422
+
+
+def test_project_preview_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "../outside.py"})
+    assert response.status_code == 400
+
+
+def test_project_preview_rejects_excluded_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "image.png"})
+    assert response.status_code == 400
+
+
+def test_project_preview_rejects_oversized_file(tmp_path, monkeypatch):
+    from app.file_edits import MAX_FILE_BYTES
+
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "huge.py").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "huge.py"})
+    assert response.status_code == 400
+
+
+def test_project_preview_rejects_hard_linked_file(tmp_path, monkeypatch):
+    import os as _os
+
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path / "root"))
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "shared.py"
+    target.write_text("shared = 1\n", encoding="utf-8")
+    try:
+        _os.link(target, tmp_path / "outside-link.py")
+    except OSError:
+        pytest.skip("hard links unavailable on this filesystem")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "shared.py"})
+    assert response.status_code == 400
+
+
+def test_project_preview_requires_configured_project_root(monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "mod.py"})
+    assert response.status_code == 503
+
+
+def test_project_preview_hostile_source_text_stays_plain_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    hostile = "# <script>alert(1)</script> & \"quoted\" 'text'\n"
+    (tmp_path / "mod.py").write_text(hostile, encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "mod.py"})
+    assert response.status_code == 200
+    body = response.json()
+    # Returned verbatim as a plain JSON string; the page must render it with
+    # .textContent (guarded by test_project_browser_page_never_uses_unsafe_dom_sinks).
+    assert body["lines"][0] == hostile.rstrip("\n")
+
+
 def test_project_definitions_bounded_results_are_truncated(tmp_path, monkeypatch):
     from app.project_files import MAX_SEARCH_RESULTS
 

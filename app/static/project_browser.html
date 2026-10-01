@@ -21,6 +21,10 @@
   .meta { color: #888; }
   .error { color: #b00020; font-family: ui-monospace, Consolas, monospace; }
   .flag { display: inline-block; margin-left: 0.5rem; padding: 0 0.4rem; border-radius: 4px; background: #8883; font-size: 0.75rem; }
+  ul.results li.clickable { cursor: pointer; }
+  ul.results li.clickable:hover { background: #8882; }
+  ol.preview-lines { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; margin: 0.5rem 0 0; padding-left: 2.75rem; max-height: 28rem; overflow: auto; border: 1px solid #8884; border-radius: 4px; }
+  ol.preview-lines li { white-space: pre-wrap; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -65,6 +69,14 @@ Groq, or model call is made by this page, and nothing here edits or executes any
     <button id="defs-run" type="button">Find</button>
   </div>
   <ul id="defs-results" class="results"></ul>
+</section>
+
+<section id="preview-section">
+  <h2>Preview</h2>
+  <p class="note">Click a file, search hit, or definition above to show a bounded
+  range of numbered lines here. Read-only; nothing can be edited or run.</p>
+  <div id="preview-meta" class="meta"></div>
+  <ol id="preview-lines" class="preview-lines"></ol>
 </section>
 
 <script>
@@ -112,6 +124,34 @@ function qs(params) {
   return parts.join("&");
 }
 
+function clickable(li, path, line) {
+  li.classList.add("clickable");
+  li.addEventListener("click", function () { preview(path, line); });
+  return li;
+}
+
+function preview(path, line) {
+  var start = line && line > 10 ? line - 10 : 1;
+  var metaEl = document.getElementById("preview-meta");
+  var linesEl = document.getElementById("preview-lines");
+  clear(linesEl);
+  metaEl.textContent = "Loading " + path + " ...";
+  request("/project/preview?" + qs({ path: path, start: start, lines: 120 })).then(function (result) {
+    if (!result.ok) {
+      metaEl.textContent = "";
+      return showError(linesEl, result.status, result.data.detail);
+    }
+    var data = result.data;
+    metaEl.textContent = data.path + " (lines " + data.start_line + "-" + data.end_line +
+      " of " + data.total_lines + ")" + (data.truncated ? " [truncated]" : "");
+    linesEl.setAttribute("start", String(data.start_line));
+    (data.lines || []).forEach(function (lineText) {
+      linesEl.appendChild(el("li", "", lineText));
+    });
+    if ((data.lines || []).length === 0) linesEl.appendChild(el("li", "meta", "(empty file)"));
+  }, function (err) { metaEl.textContent = ""; showError(linesEl, "network", String(err)); });
+}
+
 function runFiles() {
   var path = document.getElementById("files-path").value || ".";
   var list = document.getElementById("files-results");
@@ -119,7 +159,7 @@ function runFiles() {
   request("/project/files?" + qs({ path: path })).then(function (result) {
     if (!result.ok) return showError(list, result.status, result.data.detail);
     (result.data.files || []).forEach(function (filePath) {
-      list.appendChild(el("li", "", filePath));
+      list.appendChild(clickable(el("li", "", filePath), filePath, 1));
     });
     if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
     if ((result.data.files || []).length === 0) list.appendChild(el("li", "meta", "(no files)"));
@@ -139,7 +179,7 @@ function runSearch() {
       li.appendChild(el("span", "path", hit.path + ":" + hit.line));
       li.appendChild(document.createTextNode(" "));
       li.appendChild(el("span", "", hit.excerpt));
-      list.appendChild(li);
+      list.appendChild(clickable(li, hit.path, hit.line));
     });
     if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
     if ((result.data.results || []).length === 0) list.appendChild(el("li", "meta", "(no matches)"));
@@ -160,7 +200,7 @@ function runDefinitions() {
       li.appendChild(flag(hit.kind));
       li.appendChild(document.createElement("br"));
       li.appendChild(el("span", "", hit.qualified_name + " -- " + hit.excerpt));
-      list.appendChild(li);
+      list.appendChild(clickable(li, hit.path, hit.line));
     });
     if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
     if (result.data.unparsed_files) list.appendChild(el("li", "meta", result.data.unparsed_files + " file(s) could not be parsed"));
