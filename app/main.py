@@ -11,7 +11,7 @@ from typing import AsyncIterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agent_inspect import (
@@ -102,6 +102,15 @@ logger = logging.getLogger(__name__)
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/project/browser")
+def project_browser() -> FileResponse:
+    """Serve the read-only, offline project-navigation page. No key or provider call."""
+    return FileResponse(STATIC_DIR / "project_browser.html", media_type="text/html")
 
 
 def require_project_root() -> Path:

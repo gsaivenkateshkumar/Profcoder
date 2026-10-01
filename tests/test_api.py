@@ -232,6 +232,55 @@ def test_project_definitions_skips_excluded_directories(tmp_path, monkeypatch):
     assert response.json()["results"] == []
 
 
+def test_project_browser_serves_the_page(monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    with TestClient(app) as client:
+        response = client.get("/project/browser")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    body = response.text
+    assert "<title>Project browser</title>" in body
+    assert "/project/files" in body
+    assert "/project/search" in body
+    assert "/project/definitions" in body
+
+
+def test_project_browser_works_without_groq_key(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    with TestClient(app) as client:
+        app.state.provider = ExplodingProvider()
+        response = client.get("/project/browser")
+    assert response.status_code == 200
+
+
+def test_project_browser_page_never_uses_unsafe_dom_sinks():
+    page = (Path(__file__).resolve().parents[1] / "app" / "static" / "project_browser.html").read_text(
+        encoding="utf-8"
+    )
+    for unsafe in ("innerHTML", "insertAdjacentHTML", "document.write(", " eval("):
+        assert unsafe not in page
+    assert "textContent" in page
+
+
+def test_search_hostile_filename_and_excerpt_stay_plain_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    hostile_name = "a&b'c.py"
+    hostile_line = "# <script>alert(1)</script> & \"quoted\" 'text'"
+    (tmp_path / hostile_name).write_text(hostile_line + "\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/search", params={"q": "alert"})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["results"]) == 1
+    assert body["results"][0]["path"] == hostile_name
+    # The API returns the raw text verbatim in a JSON string field; no HTML
+    # escaping happens server-side. Safety relies on the page always writing
+    # such fields with .textContent, which test_project_browser_page_never_
+    # uses_unsafe_dom_sinks (above) guards, and which this exact value exercises.
+    assert "<script>" in body["results"][0]["excerpt"]
+
+
 def test_project_definitions_bounded_results_are_truncated(tmp_path, monkeypatch):
     from app.project_files import MAX_SEARCH_RESULTS
 

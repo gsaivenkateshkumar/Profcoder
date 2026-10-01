@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'">
+<title>Project browser</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 60rem; }
+  h1 { font-size: 1.1rem; }
+  p.note { color: #666; font-size: 0.85rem; }
+  section { margin-bottom: 1.5rem; border: 1px solid #8884; border-radius: 6px; padding: 0.75rem 1rem; }
+  label { display: inline-block; min-width: 4rem; }
+  input[type=text] { width: 16rem; max-width: 60vw; }
+  button { margin-left: 0.5rem; }
+  .row { margin-bottom: 0.4rem; }
+  ul.results { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+  ul.results li { padding: 0.25rem 0; border-top: 1px solid #8882; font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-all; }
+  .path { font-weight: 600; }
+  .meta { color: #888; }
+  .error { color: #b00020; font-family: ui-monospace, Consolas, monospace; }
+  .flag { display: inline-block; margin-left: 0.5rem; padding: 0 0.4rem; border-radius: 4px; background: #8883; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+<h1>Profcoder project browser</h1>
+<p class="note">Read-only. Every request below stays on this host and calls only the existing
+/project/files, /project/search and /project/definitions endpoints. No external network, CDN,
+Groq, or model call is made by this page, and nothing here edits or executes anything.</p>
+
+<section id="files-section">
+  <h2>Files</h2>
+  <div class="row">
+    <label for="files-path">Path</label>
+    <input id="files-path" type="text" value=".">
+    <button id="files-run" type="button">List</button>
+  </div>
+  <ul id="files-results" class="results"></ul>
+</section>
+
+<section id="search-section">
+  <h2>Search</h2>
+  <div class="row">
+    <label for="search-q">Query</label>
+    <input id="search-q" type="text">
+  </div>
+  <div class="row">
+    <label for="search-path">Path</label>
+    <input id="search-path" type="text" value=".">
+    <button id="search-run" type="button">Search</button>
+  </div>
+  <ul id="search-results" class="results"></ul>
+</section>
+
+<section id="definitions-section">
+  <h2>Definitions</h2>
+  <div class="row">
+    <label for="defs-name">Name</label>
+    <input id="defs-name" type="text" placeholder="Class.method">
+  </div>
+  <div class="row">
+    <label for="defs-path">Path</label>
+    <input id="defs-path" type="text" value=".">
+    <button id="defs-run" type="button">Find</button>
+  </div>
+  <ul id="defs-results" class="results"></ul>
+</section>
+
+<script>
+"use strict";
+
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+// Every value that may come from repository content (paths, excerpts, names)
+// is attached with textContent only, never assigned as markup, so hostile
+// file or path content can never be parsed as HTML.
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function flag(text) {
+  return el("span", "flag", text);
+}
+
+function showError(list, status, detail) {
+  clear(list);
+  var li = el("li", "error", "Error " + status + ": " + (detail === undefined ? "" : detail));
+  list.appendChild(li);
+}
+
+function request(url) {
+  return fetch(url, { credentials: "same-origin" }).then(function (response) {
+    return response.json().catch(function () { return {}; }).then(function (data) {
+      return { ok: response.ok, status: response.status, data: data };
+    });
+  });
+}
+
+function qs(params) {
+  var parts = [];
+  Object.keys(params).forEach(function (key) {
+    if (params[key] !== "" && params[key] !== undefined) {
+      parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(params[key]));
+    }
+  });
+  return parts.join("&");
+}
+
+function runFiles() {
+  var path = document.getElementById("files-path").value || ".";
+  var list = document.getElementById("files-results");
+  clear(list);
+  request("/project/files?" + qs({ path: path })).then(function (result) {
+    if (!result.ok) return showError(list, result.status, result.data.detail);
+    (result.data.files || []).forEach(function (filePath) {
+      list.appendChild(el("li", "", filePath));
+    });
+    if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
+    if ((result.data.files || []).length === 0) list.appendChild(el("li", "meta", "(no files)"));
+  }, function (err) { showError(list, "network", String(err)); });
+}
+
+function runSearch() {
+  var q = document.getElementById("search-q").value;
+  var path = document.getElementById("search-path").value || ".";
+  var list = document.getElementById("search-results");
+  clear(list);
+  if (!q) return showError(list, "400", "Query is required");
+  request("/project/search?" + qs({ q: q, path: path })).then(function (result) {
+    if (!result.ok) return showError(list, result.status, result.data.detail);
+    (result.data.results || []).forEach(function (hit) {
+      var li = el("li");
+      li.appendChild(el("span", "path", hit.path + ":" + hit.line));
+      li.appendChild(document.createTextNode(" "));
+      li.appendChild(el("span", "", hit.excerpt));
+      list.appendChild(li);
+    });
+    if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
+    if ((result.data.results || []).length === 0) list.appendChild(el("li", "meta", "(no matches)"));
+  }, function (err) { showError(list, "network", String(err)); });
+}
+
+function runDefinitions() {
+  var name = document.getElementById("defs-name").value;
+  var path = document.getElementById("defs-path").value || ".";
+  var list = document.getElementById("defs-results");
+  clear(list);
+  if (!name) return showError(list, "400", "Name is required");
+  request("/project/definitions?" + qs({ name: name, path: path })).then(function (result) {
+    if (!result.ok) return showError(list, result.status, result.data.detail);
+    (result.data.results || []).forEach(function (hit) {
+      var li = el("li");
+      li.appendChild(el("span", "path", hit.path + ":" + hit.line));
+      li.appendChild(flag(hit.kind));
+      li.appendChild(document.createElement("br"));
+      li.appendChild(el("span", "", hit.qualified_name + " -- " + hit.excerpt));
+      list.appendChild(li);
+    });
+    if (result.data.truncated) list.appendChild(el("li", "meta", "(truncated)"));
+    if (result.data.unparsed_files) list.appendChild(el("li", "meta", result.data.unparsed_files + " file(s) could not be parsed"));
+    if ((result.data.results || []).length === 0) list.appendChild(el("li", "meta", "(no definitions found)"));
+  }, function (err) { showError(list, "network", String(err)); });
+}
+
+document.getElementById("files-run").addEventListener("click", runFiles);
+document.getElementById("search-run").addEventListener("click", runSearch);
+document.getElementById("defs-run").addEventListener("click", runDefinitions);
+</script>
+</body>
+</html>

@@ -70,6 +70,14 @@ and oversized files. They do not send indexed content automatically. Requests
 are bounded by path, scan, file, result, and excerpt limits. If `REPO_ROOT` is
 unset or invalid, these endpoints return `503`.
 
+Open `http://127.0.0.1:8001/project/browser` for a small local page over the
+same three endpoints: file listing, search, and definitions, with truncation
+and error states shown. It is served from `app/static/`, uses no CDN, cloud
+API, Groq, or model call, and works with no `GROQ_API_KEY` set. All
+repository-derived text (paths, excerpts, names) is written with
+`textContent` only, never parsed as HTML, so it is safe to point at untrusted
+content. There is no editing or command execution anywhere on the page.
+
 ## Local project inspection
 `POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and
 uses Groq function calling with read-only project listing, text search, Python
