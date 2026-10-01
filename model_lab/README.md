@@ -352,6 +352,54 @@ existing LLM and does not train the Profcoder model. The pilot pages are in no
 training or validation split, and the owned ASTRA/company corpus, split, and
 checkpoints are unchanged.
 
+## Function-completion extraction feasibility (owned-v5-reviewed)
+
+`model_lab.extract_pairs` is an offline, read-only feasibility tool, separate
+from training. It reuses `read_selection()` to read exactly the files an
+already-reviewed manifest lists, parses each with `ast` (never `exec`/`eval`),
+and for every module-level function or class method builds a candidate pair:
+a prompt (a leading docstring or directly adjacent `#` comment block, plus the
+signature) and a target (the remaining function body, exact original source).
+Candidates keep their project, corpus path, original repository-relative path
+(from version-3 manifests), commit, and rights basis, and never merge a
+project's declared train/validation split. Duplicate candidate text is
+rejected, distinguishing a same-split duplicate from one that would otherwise
+cross train/validation. Nested (function-in-function) definitions and
+one-line `def ...: body` signatures are out of scope and rejected, not
+guessed at. Only aggregate counts are ever printed; prompt/target text and the
+full report go only to a chosen, ignored output directory:
+
+```powershell
+& .\.venv\Scripts\python.exe -m model_lab.extract_pairs --manifest model_lab/data/local/owned-v5-reviewed/manifest.json --output model_lab/runs/owned-v5-extraction-v1
+```
+
+Result on `owned-v5-reviewed` (178 files, 10 projects): 2,700 functions
+considered, 738 accepted. Rejections: 1,935 had no leading docstring/comment
+("no_descriptive_prompt"), 13 were one-line `def` signatures, 13 had a trivial
+body (`pass`/`...`/bare `NotImplementedError`), and 1 was a same-split
+duplicate. No candidate was rejected for unsafe content. Of the 738 accepted,
+only 11 fit a 128-token context and 99 fit 256 tokens (byte-tokenizer count,
+including BOS/EOS) — most real function bodies with a docstring simply do not
+fit this model's context at either length. The split is heavily imbalanced
+(732 train vs. 6 validation) because only one validation project
+(`budgetbuddy`) contributed an accepted candidate, and one project
+(`astra-har-edgeai`) supplies more than half of all accepted candidates (400).
+
+**Assessment: this candidate set does not justify a controlled training
+pilot yet.** It is large in raw count but narrow in the dimension that
+matters for this model's 128/256-token context: only 110 of 738 candidates
+(15%) fit at all, and the validation side is a single small project
+contributing 6 examples total, far too few to detect generalization the way
+earlier task-pilot runs did. The project distribution is also dominated by
+one repository, so "learning" at this length would likely mean memorizing
+`astra-har-edgeai`'s docstring style specifically. A pilot would need either a
+longer context budget, a prompt/target construction that fits more real
+functions into 128–256 tokens (e.g. signature-only prompts, or truncated
+single-statement targets), or several more validation-side projects with
+accepted candidates, before the held-out side could say anything beyond
+"zero or near-zero generalization," which is already the established result
+from task-pilot-v1/v2 on much easier synthetic data.
+
 ## Next milestones
 
 1. Review the local owner-authorized corpus and add independently reviewed
