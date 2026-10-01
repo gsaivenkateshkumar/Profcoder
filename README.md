@@ -66,7 +66,10 @@ never executes any file, works with no `GROQ_API_KEY` set, and makes no
 provider call — this is offline code navigation, not generation by the
 from-scratch Profcoder model in `model_lab/`. The read-only endpoints exclude
 credentials, environment files, VCS data, virtual environments, caches, binary
-and oversized files. They do not send indexed content automatically. Requests
+and oversized files, plus this repo's own ignored `model_lab/runs/` and
+`model_lab/data/local/` (private corpora and training run output) by exact
+path, whether requested directly or reached while browsing an ancestor
+directory. They do not send indexed content automatically. Requests
 are bounded by path, scan, file, result, and excerpt limits. If `REPO_ROOT` is
 unset or invalid, these endpoints return `503`.
 

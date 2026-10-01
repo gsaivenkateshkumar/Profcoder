@@ -70,6 +70,38 @@ def test_project_tools_exclude_secrets_caches_binary_and_large_files(project_cli
     assert search["results"] == [{"path": "visible.txt", "line": 1, "excerpt": "needle"}]
 
 
+def test_private_model_lab_data_is_excluded_directly_and_when_nested(project_client):
+    client, root = project_client
+    (root / "model_lab" / "runs" / "owned-v5-extraction-v1").mkdir(parents=True)
+    (root / "model_lab" / "runs" / "owned-v5-extraction-v1" / "report.json").write_text(
+        "needle", encoding="utf-8"
+    )
+    (root / "model_lab" / "data" / "local" / "owned-v5").mkdir(parents=True)
+    (root / "model_lab" / "data" / "local" / "owned-v5" / "manifest.json").write_text(
+        "needle", encoding="utf-8"
+    )
+    (root / "model_lab" / "data" / "samples").mkdir(parents=True)
+    (root / "model_lab" / "data" / "samples" / "train.txt").write_text("needle", encoding="utf-8")
+    (root / "model_lab" / "data" / "manifest.json").write_text("needle", encoding="utf-8")
+
+    # Direct access to either private path is refused, not silently emptied.
+    assert client.get("/project/files", params={"path": "model_lab/runs"}).status_code == 400
+    assert client.get("/project/files", params={"path": "model_lab/data/local"}).status_code == 400
+
+    # Nested access (walking down from an ancestor) omits both private trees
+    # but keeps their ordinary sibling files.
+    listing = client.get("/project/files").json()
+    assert set(listing["files"]) == {
+        "model_lab/data/manifest.json",
+        "model_lab/data/samples/train.txt",
+    }
+    search = client.get("/project/search", params={"q": "needle"}).json()
+    assert {hit["path"] for hit in search["results"]} == {
+        "model_lab/data/manifest.json",
+        "model_lab/data/samples/train.txt",
+    }
+
+
 def test_project_paths_reject_traversal(project_client, tmp_path):
     client, _ = project_client
 

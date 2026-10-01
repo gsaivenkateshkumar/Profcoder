@@ -33,6 +33,12 @@ EXCLUDED_SUFFIXES = {
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 REPARSE_POINT_ATTRIBUTE = 0x400
 
+# Profcoder's own ignored, local-only model corpora and training run output
+# (see .gitignore). Excluded by their fixed path from the project root, not
+# by bare directory name, so an unrelated project's "runs" or "local"
+# directory elsewhere is never affected.
+EXCLUDED_RELATIVE_PATHS = frozenset({"model_lab/data/local", "model_lab/runs"})
+
 
 class ProjectPathError(ValueError):
     pass
@@ -44,6 +50,14 @@ def _is_within(root: Path, candidate: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_excluded_relative(relative_posix_path: str) -> bool:
+    folded = relative_posix_path.casefold()
+    return any(
+        folded == excluded or folded.startswith(excluded + "/")
+        for excluded in EXCLUDED_RELATIVE_PATHS
+    )
 
 
 def _is_reparse_point(metadata: os.stat_result) -> bool:
@@ -78,6 +92,8 @@ def resolve_scope(root: Path, relative_path: str) -> tuple[Path, Path]:
 
     if not _is_within(canonical_root, scope) or not scope.is_dir():
         raise ProjectPathError("Path must be an existing directory inside the configured project root")
+    if _is_excluded_relative(scope.relative_to(canonical_root).as_posix()):
+        raise ProjectPathError("Path must stay inside the configured project root")
     return canonical_root, scope
 
 
@@ -132,6 +148,8 @@ def _walk_files(root: Path, scope: Path, *, file_limit: int) -> tuple[list[Path]
                 continue
             canonical_directory = directory.resolve(strict=True)
             if not _is_within(root, canonical_directory):
+                continue
+            if _is_excluded_relative(canonical_directory.relative_to(root).as_posix()):
                 continue
             with os.scandir(canonical_directory) as iterator:
                 entries = []

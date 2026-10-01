@@ -380,6 +380,27 @@ def test_project_preview_rejects_hard_linked_file(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
+def test_project_definitions_excludes_private_model_lab_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "model_lab" / "runs").mkdir(parents=True)
+    (tmp_path / "model_lab" / "runs" / "mod.py").write_text("def greet():\n    return 1\n", encoding="utf-8")
+    with TestClient(app) as client:
+        direct = client.get("/project/definitions", params={"name": "greet", "path": "model_lab/runs"})
+        nested = client.get("/project/definitions", params={"name": "greet", "path": "model_lab"})
+    assert direct.status_code == 400
+    assert nested.status_code == 200
+    assert nested.json()["results"] == []
+
+
+def test_project_preview_excludes_private_model_lab_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "model_lab" / "data" / "local").mkdir(parents=True)
+    (tmp_path / "model_lab" / "data" / "local" / "secret.txt").write_text("SENTINEL", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/preview", params={"path": "model_lab/data/local/secret.txt"})
+    assert response.status_code == 400
+
+
 def test_project_preview_requires_configured_project_root(monkeypatch):
     monkeypatch.delenv("REPO_ROOT", raising=False)
     with TestClient(app) as client:

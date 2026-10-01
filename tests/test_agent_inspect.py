@@ -147,6 +147,41 @@ def test_inspect_does_not_read_excluded_or_outside_files(inspector, tmp_path, mo
     assert read_calls == []
 
 
+def test_inspect_does_not_read_private_model_lab_data(inspector):
+    client, root = inspector
+    (root / "model_lab" / "runs").mkdir(parents=True)
+    (root / "model_lab" / "runs" / "report.json").write_text("RUNS_SENTINEL", encoding="utf-8")
+    (root / "model_lab" / "data" / "local").mkdir(parents=True)
+    (root / "model_lab" / "data" / "local" / "manifest.json").write_text(
+        "LOCAL_SENTINEL", encoding="utf-8"
+    )
+    model = FakeToolModel([
+        model_message(tool_calls=[tool_call("read_file", {"path": "model_lab/runs/report.json"}, "runs")]),
+        model_message(tool_calls=[
+            tool_call("read_file", {"path": "model_lab/data/local/manifest.json"}, "local")
+        ]),
+        model_message(tool_calls=[tool_call("list_files", {"path": "model_lab"}, "list")]),
+        model_message(content="Those files are unavailable."),
+    ])
+    app.state.provider = model
+
+    response = client.post("/agent/inspect", json={"question": "Read the run data."})
+
+    assert response.status_code == 200
+    tool_results = {
+        message["tool_call_id"]: message["content"]
+        for request in model.requests
+        for message in request["messages"]
+        if message["role"] == "tool"
+    }
+    assert "RUNS_SENTINEL" not in tool_results["runs"]
+    assert "LOCAL_SENTINEL" not in tool_results["local"]
+    assert '"code":"invalid_arguments"' in tool_results["runs"]
+    assert '"code":"invalid_arguments"' in tool_results["local"]
+    assert "model_lab/runs" not in tool_results["list"]
+    assert "model_lab/data/local" not in tool_results["list"]
+
+
 @pytest.mark.parametrize(
     "call",
     [
