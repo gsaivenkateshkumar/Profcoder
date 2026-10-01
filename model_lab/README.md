@@ -224,7 +224,7 @@ If the smoke run passes, start the bounded full experiment:
 
 `--resume --run model_lab/runs/train-v1` continues a saved run up to its
 `--max-steps` total. The default is 100 steps and the permitted maximum is
-1,000 total steps. Each invocation is still capped at 30 minutes
+3,000 total steps. Each invocation is still capped at 30 minutes
 (`--max-seconds`, at most 1,800), so a longer run may need `--resume`. A resume
 refuses a checkpoint already beyond the requested `--max-steps`. Reuse the
 original batch size and sequence length on resume;
@@ -323,7 +323,7 @@ quality.
   Python, the optimizer, and Windows require more. The measured `train-v1`
   peak was 347 MB of process RAM.
 - First training run (the default budget; `--max-steps` now permits up to
-  1,000): cap it at 100 steps with batch 8 and sequence length 64
+  3,000): cap it at 100 steps with batch 8 and sequence length 64
   (at most 51,200 training-token positions) and a 30-minute soft cutoff. Record
   tokens per second, peak process memory, CPU usage, checkpoint size, train and
   held-out validation loss, and exact wall time before increasing the budget.

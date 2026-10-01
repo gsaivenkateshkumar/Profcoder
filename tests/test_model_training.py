@@ -101,14 +101,14 @@ class CpuModelTrainingTests(unittest.TestCase):
     def test_step_budget_bounds(self):
         from model_lab.train import MAX_SECONDS, MAX_STEPS, TrainConfig
 
-        self.assertEqual((MAX_STEPS, MAX_SECONDS), (1000, 1800))
+        self.assertEqual((MAX_STEPS, MAX_SECONDS), (3000, 1800))
         self.assertEqual(TrainConfig().max_steps, 100)  # default stays small
-        self.assertEqual(TrainConfig(max_steps=1000, eval_every=100).max_steps, 1000)
-        for bad in (0, 1001, 100.0):
+        self.assertEqual(TrainConfig(max_steps=3000, eval_every=100).max_steps, 3000)
+        for bad in (0, 3001, 100.0):
             with self.subTest(max_steps=bad), self.assertRaisesRegex(ValueError, "max_steps"):
                 TrainConfig(max_steps=bad)
         with self.assertRaisesRegex(ValueError, "eval_every"):
-            TrainConfig(eval_every=1001)
+            TrainConfig(eval_every=3001)
         with self.assertRaisesRegex(ValueError, "30-minute"):
             TrainConfig(max_seconds=1800.5)
 

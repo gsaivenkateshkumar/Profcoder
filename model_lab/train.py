@@ -20,7 +20,7 @@ from model_lab.model import ByteTransformer, ModelConfig
 from model_lab.resources import peak_rss_bytes
 from model_lab.tokenizer import TOKENIZER_VERSION, VOCAB_SIZE
 
-MAX_STEPS = 1000
+MAX_STEPS = 3000
 MAX_SECONDS = 1800
 MAX_TOKEN_FILE_BYTES = 2 * (16 * 1024 * 1024 + 1000)
 
@@ -177,7 +177,7 @@ def train(
     data_dir: Path, run_dir: Path, config: TrainConfig = TrainConfig(), *,
     resume: bool = False,
 ) -> dict[str, object]:
-    """Train at most MAX_STEPS (1000) total steps; each invocation lasts at most ~30 minutes."""
+    """Train at most MAX_STEPS (3000) total steps; each invocation lasts at most ~30 minutes."""
     start = time.perf_counter()
     cpu_start = time.process_time()
     deadline = start + config.max_seconds
