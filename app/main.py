@@ -40,6 +40,7 @@ from app.project_files import (
 )
 from app.file_preview import MAX_PREVIEW_LINES, FileEditError, preview_project_file
 from app.symbol_search import find_definitions
+from app.syntax_check import check_python_syntax
 from app.test_runner import GitChangeReader
 
 
@@ -159,6 +160,14 @@ def project_preview(
 ):
     try:
         return preview_project_file(require_project_root(), path, start, lines)
+    except (ProjectPathError, FileEditError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/project/syntax-check")
+def project_syntax_check(path: str = Query(min_length=1, max_length=MAX_PATH_CHARS)):
+    try:
+        return check_python_syntax(require_project_root(), path)
     except (ProjectPathError, FileEditError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -87,6 +87,12 @@ excerpts, names, previewed lines) is written with `textContent` only, never
 parsed as HTML, so it is safe to point at untrusted content. There is no
 editing or command execution anywhere on the page.
 
+The previewed file's "Check syntax" button calls `GET /project/syntax-check
+?path=...`, which accepts only `.py` files reached through the same safe
+single-file resolution, reads the bounded text, and runs `ast.parse` on it --
+never importing, executing, or writing the source. It reports either success
+or a syntax error's line and column, rendered as text.
+
 ## Local project inspection
 `POST http://127.0.0.1:8001/agent/inspect` accepts `{"question":"..."}` and
 uses Groq function calling with read-only project listing, text search, Python

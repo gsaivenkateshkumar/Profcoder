@@ -243,6 +243,8 @@ def test_project_browser_serves_the_page(monkeypatch):
     assert "/project/files" in body
     assert "/project/search" in body
     assert "/project/definitions" in body
+    assert "/project/preview" in body
+    assert "/project/syntax-check" in body
 
 
 def test_project_browser_works_without_groq_key(monkeypatch):
@@ -419,6 +421,73 @@ def test_project_preview_hostile_source_text_stays_plain_text(tmp_path, monkeypa
     # Returned verbatim as a plain JSON string; the page must render it with
     # .textContent (guarded by test_project_browser_page_never_uses_unsafe_dom_sinks).
     assert body["lines"][0] == hostile.rstrip("\n")
+
+
+def test_project_syntax_check_valid_python(tmp_path, monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "mod.py").write_text("def greet():\n    return 'hi'\n", encoding="utf-8")
+    with TestClient(app) as client:
+        app.state.provider = ExplodingProvider()
+        response = client.get("/project/syntax-check", params={"path": "mod.py"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"path": "mod.py", "ok": True, "line": None, "column": None, "message": None}
+
+
+def test_project_syntax_check_invalid_python_reports_line_and_column(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "broken.py").write_text("def greet(:\n    return 1\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": "broken.py"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["path"] == "broken.py"
+    assert body["ok"] is False
+    assert body["line"] == 1
+    assert isinstance(body["column"], int)
+    assert isinstance(body["message"], str) and body["message"]
+
+
+def test_project_syntax_check_rejects_non_python_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": "notes.txt"})
+    assert response.status_code == 400
+
+
+def test_project_syntax_check_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": "../outside.py"})
+    assert response.status_code == 400
+
+
+def test_project_syntax_check_rejects_excluded_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "hook.py").write_text("x = 1\n", encoding="utf-8")
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": ".git/hook.py"})
+    assert response.status_code == 400
+
+
+def test_project_syntax_check_rejects_oversized_file(tmp_path, monkeypatch):
+    from app.file_edits import MAX_FILE_BYTES
+
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    (tmp_path / "huge.py").write_bytes(b"#" + b"x" * (MAX_FILE_BYTES + 1))
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": "huge.py"})
+    assert response.status_code == 400
+
+
+def test_project_syntax_check_requires_configured_project_root(monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    with TestClient(app) as client:
+        response = client.get("/project/syntax-check", params={"path": "mod.py"})
+    assert response.status_code == 503
 
 
 def test_project_definitions_bounded_results_are_truncated(tmp_path, monkeypatch):
