@@ -36,7 +36,7 @@ MAX_CANDIDATES = 5000
 MAX_FUNCTIONS_PER_FILE = 200
 MIN_DESCRIPTIVE_CHARS = 8
 TRIVIAL_DESCRIPTIONS = {"todo", "fixme", "note", "pragma: no cover", "xxx"}
-CONTEXT_LENGTHS = (128, 256)
+CONTEXT_LENGTHS = (128, 256, 512, 1024)
 
 
 @dataclass(frozen=True)
@@ -57,8 +57,7 @@ class Candidate:
     prompt_bytes: int
     target_bytes: int
     total_tokens: int
-    fits_128: bool
-    fits_256: bool
+    fits: dict[int, bool]
     content_sha256: str
 
 
@@ -228,19 +227,22 @@ def extract_candidates(manifest_path: Path) -> dict[str, object]:
                 prompt_bytes=len(prompt.encode("utf-8")),
                 target_bytes=len(target.encode("utf-8")),
                 total_tokens=token_count,
-                fits_128=token_count <= 128,
-                fits_256=token_count <= 256,
+                fits={length: token_count <= length for length in CONTEXT_LENGTHS},
                 content_sha256=digest,
             ))
 
+    sorted_lengths = sorted(CONTEXT_LENGTHS)
     length_buckets = Counter()
     for candidate in accepted:
-        if candidate.fits_128:
-            length_buckets["<=128"] += 1
-        elif candidate.fits_256:
-            length_buckets["129-256"] += 1
+        previous = 0
+        for length in sorted_lengths:
+            if candidate.total_tokens <= length:
+                bucket = f"<={length}" if previous == 0 else f"{previous + 1}-{length}"
+                break
+            previous = length
         else:
-            length_buckets[">256"] += 1
+            bucket = f">{sorted_lengths[-1]}"
+        length_buckets[bucket] += 1
 
     report = {
         "manifest_sha256": hashlib.sha256(selection.manifest_bytes).hexdigest(),
@@ -249,8 +251,7 @@ def extract_candidates(manifest_path: Path) -> dict[str, object]:
         "candidates_accepted": len(accepted),
         "rejection_reasons": dict(sorted(rejections.items())),
         "length_buckets": dict(sorted(length_buckets.items())),
-        "fits_128": sum(c.fits_128 for c in accepted),
-        "fits_256": sum(c.fits_256 for c in accepted),
+        "fits": {length: sum(c.fits[length] for c in accepted) for length in sorted_lengths},
         "project_distribution": dict(sorted(Counter(c.project for c in accepted).items())),
         "split_distribution": dict(sorted(Counter(c.split for c in accepted).items())),
         "prompt_source_distribution": dict(sorted(Counter(c.prompt_source for c in accepted).items())),

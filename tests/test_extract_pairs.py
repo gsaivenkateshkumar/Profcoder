@@ -152,11 +152,37 @@ class ExtractPairsTests(unittest.TestCase):
         result = self.extract()
         tiny = self.find(result, "tiny")
         big = self.find(result, "big")
-        self.assertTrue(tiny.fits_128)
-        self.assertFalse(big.fits_128)
-        self.assertFalse(big.fits_256)
-        self.assertGreaterEqual(result["report"]["fits_128"], 1)
-        self.assertEqual(result["report"]["length_buckets"][">256"], 1)
+        self.assertTrue(tiny.fits[128])
+        self.assertFalse(big.fits[128])
+        self.assertFalse(big.fits[256])
+        self.assertFalse(big.fits[1024])
+        self.assertGreaterEqual(result["report"]["fits"][128], 1)
+        self.assertEqual(sum(result["report"]["length_buckets"].values()), result["report"]["candidates_accepted"])
+
+    def test_candidates_land_in_257_512_and_513_1024_buckets(self):
+        def text_for(name, pad_len):
+            return f'# Comment for {name}.\ndef {name}():\n    return "{"A" * pad_len}"\n'
+
+        def base_tokens(name):
+            prompt = f'# Comment for {name}.\ndef {name}():'
+            target = '    return ""'
+            return len(encode(prompt + "\n" + target, add_bos=True, add_eos=True))
+
+        pad_mid = 257 - base_tokens("mid")
+        pad_high = 513 - base_tokens("high")
+        self.add_file("alpha", "a", text_for("mid", pad_mid))
+        self.add_file("alpha", "b", text_for("high", pad_high))
+        result = self.extract()
+        mid = self.find(result, "mid")
+        high = self.find(result, "high")
+        self.assertTrue(256 < mid.total_tokens <= 512, mid.total_tokens)
+        self.assertTrue(512 < high.total_tokens <= 1024, high.total_tokens)
+        self.assertFalse(mid.fits[256])
+        self.assertTrue(mid.fits[512])
+        self.assertFalse(high.fits[512])
+        self.assertTrue(high.fits[1024])
+        self.assertEqual(result["report"]["length_buckets"].get("257-512"), 1)
+        self.assertEqual(result["report"]["length_buckets"].get("513-1024"), 1)
 
     # --- bounds -------------------------------------------------------------
 
